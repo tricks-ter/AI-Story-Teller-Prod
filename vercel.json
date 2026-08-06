@@ -9,9 +9,5 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/main.py" },
     { "source": "/(.*)", "destination": "/index.html" }
-  ],
-  "env": {
-    "DATABASE_URL": "@database_url",
-    "ZAI_API_KEY": "@zai_api_key"
-  }
+  ]
 }
