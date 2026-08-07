@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_ID } from "./models";
 // ─── Chat history ───────────────────────────────────────────────────────────
 
 const CHAT_KEY = "glm_chat_data";
@@ -70,7 +71,7 @@ export function deleteSession(sessionId) {
 const SETTINGS_KEY = "glm_chat_settings";
 
 export const DEFAULT_SETTINGS = {
-  model: "glm-4.7-flash",
+  model: DEFAULT_MODEL_ID,
   maxTokens: 4096,
   temperature: 0.7,
   enableThinking: true,

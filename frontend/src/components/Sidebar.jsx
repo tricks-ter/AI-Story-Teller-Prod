@@ -29,7 +29,7 @@ export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDele
         <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-brand-600">
           <Bot size={18} className="text-white" />
         </div>
-        <span className="text-white font-semibold text-lg tracking-tight">GLM Chat</span>
+        <span className="text-white font-semibold text-lg tracking-tight">InkMind Chat</span>
       </div>
 
       {/* New Chat */}
@@ -98,7 +98,7 @@ export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDele
 
       {/* Footer */}
       <div className="px-4 py-3 border-t border-gray-800 flex-shrink-0">
-        <p className="text-xs text-gray-600 text-center">Z.AI · GLM Models</p>
+        <p className="text-xs text-gray-600 text-center">Z.AI · InkMind Models</p>
       </div>
     </aside>
   );

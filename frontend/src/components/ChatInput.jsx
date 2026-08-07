@@ -1,16 +1,10 @@
 import { useRef, useEffect } from "react";
 import { Send, Square, Brain, Settings2 } from "lucide-react";
+import { modelName } from "../utils/models";
 
 export default function ChatInput({
-  value,
-  onChange,
-  onSend,
-  onStop,
-  onOpenSettings,
-  onToggleThinking,
-  isStreaming,
-  disabled,
-  settings,
+  value, onChange, onSend, onStop, onOpenSettings, onToggleThinking,
+  isStreaming, disabled, settings,
 }) {
   const textareaRef = useRef(null);
 
@@ -28,15 +22,11 @@ export default function ChatInput({
     }
   };
 
-  const modelShort = (settings?.model ?? "glm-4.7-flash")
-    .replace("glm-", "GLM-")
-    .replace("-flash", " Flash");
+  const modelShort = modelName(settings?.model);
 
   return (
     <div className="px-3 pb-3 pt-2 sm:px-4 sm:pb-4">
-      {/* ── Toolbar row ─────────────────────────────────────────────── */}
       <div className="flex items-center gap-2 mb-2 px-1">
-        {/* Model badge / settings shortcut */}
         <button
           onClick={onOpenSettings}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-xs text-gray-400 hover:text-white transition-colors min-h-[36px] touch-manipulation"
@@ -45,7 +35,6 @@ export default function ChatInput({
           <span className="font-medium">{modelShort}</span>
         </button>
 
-        {/* Reasoning quick-toggle */}
         <button
           onClick={onToggleThinking}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors min-h-[36px] touch-manipulation ${
@@ -65,22 +54,18 @@ export default function ChatInput({
         </button>
       </div>
 
-      {/* ── Input row ───────────────────────────────────────────────── */}
-      <div
-        className="flex items-end gap-2 bg-gray-800 border border-gray-700 rounded-2xl px-4 py-3 focus-within:border-brand-500 transition-colors duration-200"
-      >
+      <div className="flex items-end gap-2 bg-gray-800 border border-gray-700 rounded-2xl px-4 py-3 focus-within:border-brand-500 transition-colors duration-200">
         <textarea
           ref={textareaRef}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Message GLM… (Shift+Enter for new line)"
+          placeholder="Message InkMind… (Shift+Enter for new line)"
           rows={1}
           disabled={disabled}
           className="flex-1 bg-transparent text-gray-100 placeholder-gray-500 resize-none outline-none leading-relaxed max-h-44 overflow-y-auto touch-manipulation"
-          style={{ fontSize: "16px" /* prevents iOS zoom */ }}
+          style={{ fontSize: "16px" }}
         />
-
         {isStreaming ? (
           <button
             onClick={onStop}
@@ -102,7 +87,7 @@ export default function ChatInput({
       </div>
 
       <p className="text-xs text-gray-600 text-center mt-2">
-        GLM may make mistakes — verify important information.
+        InkMind may make mistakes — verify important information.
       </p>
     </div>
   );

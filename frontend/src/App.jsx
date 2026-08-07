@@ -63,7 +63,7 @@ export default function App() {
   const handleSend = useCallback(() => sendMessage(inputValue), [inputValue, sendMessage]);
   const handleSuggestion = useCallback((text) => sendMessage(text), [sendMessage]);
   const handleStop = () => { if (stopRef.current) { stopRef.current(); stopRef.current = null; } if (streamingMsg) { appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }); setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]); } setStreamingMsg(null); setIsStreaming(false); setStatusText(""); };
-  const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "GLM Chat";
+  const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
 
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">
