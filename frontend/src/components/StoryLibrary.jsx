@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowLeft, BookOpen, Plus, Clock } from 'lucide-react';
-import { BASE_URL, authHeaders } from '../utils/auth';
+import { BASE_URL, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkError } from '../utils/auth';
 
 function timeAgo(iso) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -17,16 +17,23 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
     (async () => {
       try {
-        const res = await fetch(`${BASE_URL}/stories`, { headers: authHeaders() });
-        if (!res.ok) throw new Error('Failed to load stories');
-        setStories(await res.json());
+        const res = await fetch(`${BASE_URL}/stories`, { headers: authHeaders(), signal: controller.signal });
+        const data = await parseJsonSafe(res);
+        if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
+        setStories(Array.isArray(data) ? data : []);
       } catch (err) {
-        setError(err.message);
+        console.error('[library] error:', err);
+        setError(describeNetworkError(err));
         setStories([]);
+      } finally {
+        clearTimeout(timer);
       }
     })();
+    return () => { clearTimeout(timer); controller.abort(); };
   }, []);
 
   return (
@@ -48,12 +55,14 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
       </header>
 
       <div className="flex-1 overflow-y-auto p-4">
-        {stories === null && (
-          <p className="text-center text-gray-500 text-sm mt-12">Loading your sagas…</p>
+        {error && (
+          <div className="max-w-4xl mx-auto mb-4 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+            {error}
+          </div>
         )}
 
-        {error && (
-          <p className="text-center text-red-400 text-sm mt-12">{error}</p>
+        {stories === null && !error && (
+          <p className="text-center text-gray-500 text-sm mt-12">Loading your sagas…</p>
         )}
 
         {stories !== null && stories.length === 0 && !error && (

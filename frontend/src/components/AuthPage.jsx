@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { ArrowLeft, LogIn, UserPlus } from 'lucide-react';
-import { BASE_URL, saveAuth } from '../utils/auth';
+import { ArrowLeft, LogIn, UserPlus, AlertCircle } from 'lucide-react';
+import { BASE_URL, saveAuth, parseJsonSafe, friendlyHttp, describeNetworkError } from '../utils/auth';
 
 export default function AuthPage({ onAuthed, onBack }) {
   const [mode, setMode] = useState('login');
@@ -14,19 +14,27 @@ export default function AuthPage({ onAuthed, onBack }) {
     e.preventDefault();
     setError(null);
     setBusy(true);
+    try { document.activeElement && document.activeElement.blur(); } catch {}
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const res = await fetch(`${BASE_URL}/auth/${mode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, remember_me: remember })
+        body: JSON.stringify({ username, password, remember_me: remember }),
+        signal: controller.signal
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Authentication failed');
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
+      if (!data.token || !data.user) throw new Error('Malformed server response (missing token).');
       saveAuth(data.token, data.user, remember);
       onAuthed(data.user);
     } catch (err) {
-      setError(err.message);
+      console.error('[auth] error:', err);
+      setError(describeNetworkError(err));
     } finally {
+      clearTimeout(timer);
       setBusy(false);
     }
   };
@@ -42,12 +50,6 @@ export default function AuthPage({ onAuthed, onBack }) {
           <h2 className="text-2xl font-bold text-white">{mode === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
           <p className="text-sm text-gray-500 mt-1">Sign in to continue your journey</p>
         </div>
-
-        {error && (
-          <div className="mb-4 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
-            {error}
-          </div>
-        )}
 
         <form onSubmit={submit} className="space-y-5">
           <div>
@@ -83,6 +85,13 @@ export default function AuthPage({ onAuthed, onBack }) {
               />
               Remember me on this device
             </label>
+          )}
+
+          {error && (
+            <div className="flex items-start gap-2 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
           )}
 
           <button

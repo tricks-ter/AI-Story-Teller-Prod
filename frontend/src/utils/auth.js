@@ -40,6 +40,29 @@ export function authHeaders() {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+// ── Shared, always-visible error tooling (used by ALL future code) ──
+export async function parseJsonSafe(res) {
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch { return { detail: `Server returned non-JSON: ${text.slice(0, 120)}` }; }
+}
+
+export function friendlyHttp(status, detail) {
+  if (detail && typeof detail === "string" && detail.length < 140) return detail;
+  if (status === 401) return "Invalid username or password.";
+  if (status === 403) return "You don't have permission for that.";
+  if (status === 404) return "Service not found (404) — backend may not be deployed yet.";
+  if (status === 409) return "Already exists.";
+  if (status >= 500) return `Server error (${status}). Please try again shortly.`;
+  return `Something went wrong (HTTP ${status}).`;
+}
+
+export function describeNetworkError(err) {
+  if (err?.name === "AbortError") return "Request timed out. Check your connection and try again.";
+  if (err?.message === "Failed to fetch") return "Network error. Check your internet connection.";
+  return err?.message || "Unexpected error.";
+}
+
 export async function fetchMe() {
   const t = getToken();
   if (!t) return null;
