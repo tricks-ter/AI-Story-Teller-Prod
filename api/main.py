@@ -1,4 +1,16 @@
-import asyncio, json, os, random, logging, uuid
+import os
+import sys
+
+# ── Vercel serverless import bootstrap ─────────────────────────────
+# On Vercel the function may run with a cwd / sys.path that does NOT
+# include the api/ directory, so sibling imports (database.py, core/)
+# raise ModuleNotFoundError -> 500 FUNCTION_INVOCATION_FAILED.
+# Fix: put this file's directory on sys.path BEFORE any local import.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+import json, logging, uuid
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -7,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from zai import ZaiClient
+
 from database import db
 
 load_dotenv()
@@ -19,7 +32,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="2.2.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="2.2.1", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -54,12 +67,12 @@ def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 def create_new_story(request: StoryCreateRequest):
     story_id = str(uuid.uuid4())
     char_id = str(uuid.uuid4())
-    
+
     story_meta = {
         "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
         "rules": "Keep responses immersive and descriptive."
     }
-    
+
     char_meta = {
         "stats": {"Health": 100, "Mana": 50},
         "inventory": ["Starter Item"]
@@ -67,7 +80,7 @@ def create_new_story(request: StoryCreateRequest):
 
     db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta)
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole, request.characterBackground, metadata=char_meta)
-    
+
     intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
     db.add_story_message(story_id, "system", intro_msg, msg_type="intro")
 
@@ -108,7 +121,7 @@ async def chat_stream(request: ChatRequest):
                     yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-        
+
         if full_content: db.add_message(request.session_id, "assistant", full_content)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
