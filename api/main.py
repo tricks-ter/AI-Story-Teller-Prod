@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.3.1", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.4.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -73,8 +73,6 @@ def require_user(raw: Request) -> dict:
     return user
 
 def check_story_access(story: dict, user: dict):
-    # Legacy (pre-auth) sagas stay readable for every logged-in user;
-    # owned sagas remain private to their creator.
     owner = story.get("creator_id")
     if owner and owner != user["id"] and owner != LEGACY_USER_ID:
         raise HTTPException(status_code=403, detail="This saga belongs to another author")
@@ -90,7 +88,14 @@ def signup(req: AuthRequest):
     if db.get_user_by_username(username): raise HTTPException(status_code=409, detail="Username already taken")
     user_id = str(uuid.uuid4())
     token, expires = make_token(user_id, req.remember_me)
-    initial_meta = {"preferences": {}, "energy_credits": 0}
+    from datetime import datetime, timezone
+    initial_meta = {
+        "preferences": {},
+        "energy_credits": 0,
+        "login_count": 1,
+        "last_login_at": datetime.now(timezone.utc).isoformat(),
+        "created_via": "signup",
+    }
     ok = db.create_user_with_token(user_id, username, hash_password(req.password), token, expires, metadata=initial_meta)
     if not ok: raise HTTPException(status_code=500, detail="Could not save account. Please try again.")
     return {"token": token, "user": {"id": user_id, "username": username, "role": "user", "metadata": initial_meta}}
@@ -100,9 +105,10 @@ def login(req: AuthRequest):
     row = db.get_user_by_username(req.username.strip())
     if not row or not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    fresh_meta = db.touch_user_login(row["id"])
     token, expires = make_token(row["id"], req.remember_me)
     db.add_auth_token(token, row["id"], expires)
-    return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"], "metadata": row.get("metadata") or {}}}
+    return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"], "metadata": fresh_meta}}
 
 @router.get("/auth/me")
 def me(raw: Request):
@@ -160,10 +166,17 @@ async def chat_stream(request: ChatRequest, raw: Request):
     user = get_auth_user(raw)
     uid = user["id"] if user else None
 
+    base_meta = {
+        "model": request.model,
+        "temperature": request.temperature,
+        "enable_thinking": request.enable_thinking,
+        "stream": True,
+    }
+
     last_msg = request.messages[-1]
     if last_msg.role == "user":
         db.ensure_session(request.session_id, last_msg.content[:50] if len(last_msg.content) > 50 else "New Chat", user_id=uid)
-        db.add_message(request.session_id, "user", last_msg.content, user_id=uid)
+        db.add_message(request.session_id, "user", last_msg.content, metadata={**base_meta, "role": "user"}, user_id=uid)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None
     history = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -193,7 +206,9 @@ async def chat_stream(request: ChatRequest, raw: Request):
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-        if full_content: db.add_message(request.session_id, "assistant", full_content, user_id=uid)
+        if full_content:
+            db.add_message(request.session_id, "assistant", full_content,
+                           metadata={**base_meta, "role": "assistant", "chars": len(full_content)}, user_id=uid)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

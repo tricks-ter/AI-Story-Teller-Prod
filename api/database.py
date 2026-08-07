@@ -1,10 +1,11 @@
 import os
 import threading
+import json
+import logging
+from datetime import datetime, timezone
 import psycopg2
 from psycopg2 import extras
-import json
 from dotenv import load_dotenv
-import logging
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -72,13 +73,11 @@ class Database:
     def init_tables(self):
         if not self.database_url: return
 
-        # 1) Reserved system account for pre-auth legacy rows (can never log in)
         self.execute_query(
-            "INSERT INTO users (id, username, password_hash, role, metadata) "
-            "VALUES ('legacy-system', 'legacy-system', '!', 'user', '{}'::jsonb) "
+            "INSERT INTO users (id, username, password_hash, role, metadata, created_at) "
+            "VALUES ('legacy-system', 'legacy-system', '!', 'user', '{}'::jsonb, CURRENT_TIMESTAMP) "
             "ON CONFLICT (id) DO NOTHING", fetch="none", commit=True)
 
-        # 2) Fresh installs: full NOT NULL schema
         ddl = """
         CREATE TABLE IF NOT EXISTS users (
             id VARCHAR(36) PRIMARY KEY,
@@ -139,7 +138,6 @@ class Database:
         """
         self.execute_query(ddl, fetch="none", commit=True)
 
-        # 3) Existing installs: backfill NULLs, then lock columns (per-table isolation)
         migrations = [
             """UPDATE users SET metadata = '{}'::jsonb WHERE metadata IS NULL;
                UPDATE users SET role = 'user' WHERE role IS NULL;
@@ -202,14 +200,16 @@ class Database:
         for m in migrations:
             self.execute_query(m, fetch="none", commit=True)
 
-    # ── Auth / Users ──
+    # ── Auth / Users (every column explicitly filled) ──
     def create_user_with_token(self, user_id, username, password_hash, token, expires_at, metadata=None):
         def fn(cur):
             cur.execute(
-                "INSERT INTO users (id, username, password_hash, metadata) VALUES (%s, %s, %s, %s)",
-                (user_id, username, password_hash, json.dumps(metadata) if metadata else "{}"))
+                "INSERT INTO users (id, username, password_hash, role, metadata, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+                (user_id, username, password_hash, "user", json.dumps(metadata) if metadata else "{}"))
             cur.execute(
-                "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+                "INSERT INTO auth_tokens (token, user_id, expires_at, created_at) "
+                "VALUES (%s, %s, %s, CURRENT_TIMESTAMP)",
                 (token, user_id, expires_at))
             return True
         return self._with_conn(fn, commit=True) is True
@@ -217,15 +217,34 @@ class Database:
     def add_auth_token(self, token, user_id, expires_at):
         def fn(cur):
             cur.execute(
-                "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+                "INSERT INTO auth_tokens (token, user_id, expires_at, created_at) "
+                "VALUES (%s, %s, %s, CURRENT_TIMESTAMP)",
                 (token, user_id, expires_at))
             return True
         return self._with_conn(fn, commit=True) is True
 
+    def touch_user_login(self, user_id):
+        def fn(cur):
+            cur.execute("SELECT metadata FROM users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            meta = (row["metadata"] if row and isinstance(row["metadata"], dict) else {}) or {}
+            new_meta = {
+                "preferences": meta.get("preferences", {}),
+                "energy_credits": meta.get("energy_credits", 0),
+                "login_count": int(meta.get("login_count", 0)) + 1,
+                "last_login_at": datetime.now(timezone.utc).isoformat(),
+                "created_via": meta.get("created_via", "signup"),
+            }
+            cur.execute("UPDATE users SET metadata = %s WHERE id = %s",
+                        (json.dumps(new_meta), user_id))
+            return new_meta
+        return self._with_conn(fn, commit=True) or {}
+
     def create_user(self, user_id, username, password_hash, metadata=None):
         return self.execute_query(
-            "INSERT INTO users (id, username, password_hash, metadata) VALUES (%s, %s, %s, %s)",
-            (user_id, username, password_hash, json.dumps(metadata) if metadata else "{}"),
+            "INSERT INTO users (id, username, password_hash, role, metadata, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+            (user_id, username, password_hash, "user", json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
     def get_user_by_username(self, username):
@@ -249,38 +268,45 @@ class Database:
         if not self.database_url: return
         uid = user_id or LEGACY_USER_ID
         self.execute_query(
-            "INSERT INTO chat_sessions (id, title, user_id) VALUES (%s, %s, %s) "
-            "ON CONFLICT (id) DO UPDATE SET user_id = COALESCE(EXCLUDED.user_id, chat_sessions.user_id)",
+            "INSERT INTO chat_sessions (id, title, user_id, created_at, updated_at) "
+            "VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (id) DO UPDATE SET user_id = COALESCE(EXCLUDED.user_id, chat_sessions.user_id), "
+            "updated_at = CURRENT_TIMESTAMP",
             (session_id, title, uid), fetch="none", commit=True)
 
     def add_message(self, session_id, role, content, metadata=None, user_id=None):
         if not self.database_url: return
         uid = user_id or LEGACY_USER_ID
         self.execute_query(
-            "INSERT INTO chat_messages (session_id, role, content, metadata, user_id) VALUES (%s, %s, %s, %s, %s)",
-            (session_id, role, content, json.dumps(metadata) if metadata else "{}", uid),
+            "INSERT INTO chat_messages (session_id, role, content, user_id, metadata, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+            (session_id, role, content, uid, json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
-    # ── Stories ──
+    # ── Stories ─
     def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None):
         if not self.database_url: return
         cid = creator_id or LEGACY_USER_ID
         self.execute_query(
-            "INSERT INTO stories (id, title, genre, premise, metadata, creator_id) VALUES (%s, %s, %s, %s, %s, %s)",
-            (story_id, title, genre, premise, json.dumps(metadata) if metadata else "{}", cid),
+            "INSERT INTO stories (id, title, genre, premise, current_day, time_of_day, creator_id, "
+            "is_premium, energy_cost, metadata, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, 1, 'Morning', %s, FALSE, 0, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (story_id, title, genre, premise, cid, json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
     def add_story_character(self, char_id, story_id, name, role, background, metadata=None):
         if not self.database_url: return
         self.execute_query(
-            "INSERT INTO story_characters (id, story_id, name, role, background, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
+            "INSERT INTO story_characters (id, story_id, name, role, background, is_player, metadata, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, TRUE, %s, CURRENT_TIMESTAMP)",
             (char_id, story_id, name, role or "Character", background or "", json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
     def add_story_message(self, story_id, role, content, msg_type="narration", metadata=None):
         if not self.database_url: return
         self.execute_query(
-            "INSERT INTO story_messages (story_id, role, content, message_type, metadata) VALUES (%s, %s, %s, %s, %s)",
+            "INSERT INTO story_messages (story_id, role, content, message_type, metadata, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
             (story_id, role, content, msg_type or "narration", json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
