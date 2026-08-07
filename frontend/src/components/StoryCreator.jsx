@@ -17,8 +17,8 @@ export default function StoryCreator({ onStart, onBack }) {
   const handleFinish = () => onStart(data);
 
   return (
-    <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex items-center justify-center p-4">
-      <div className="max-w-2xl w-full bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl p-5 md:p-8 relative">
+    <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col items-center p-4">
+      <div className="my-auto w-full max-w-2xl bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl p-5 md:p-8 relative my-6">
         <button onClick={onBack} className="absolute top-3 left-3 md:top-4 md:left-4 text-gray-500 hover:text-white flex items-center gap-2 text-sm min-h-[44px] min-w-[44px] justify-center touch-manipulation">
           <ArrowLeft className="w-4 h-4" /> Back
         </button>

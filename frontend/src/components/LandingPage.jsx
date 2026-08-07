@@ -3,11 +3,11 @@ import { BookOpen, MessageSquare, Sparkles } from 'lucide-react';
 
 export default function LandingPage({ onSelectChat, onSelectStory }) {
   return (
-    <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col items-center justify-center p-4 md:p-6 relative overflow-hidden">
+    <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col items-center p-4 md:p-6 relative overflow-hidden">
       <div className="absolute top-1/4 left-1/4 w-72 h-72 md:w-96 md:h-96 bg-purple-600/20 rounded-full blur-3xl animate-pulse pointer-events-none"></div>
       <div className="absolute bottom-1/4 right-1/4 w-72 h-72 md:w-96 md:h-96 bg-blue-600/20 rounded-full blur-3xl animate-pulse delay-1000 pointer-events-none"></div>
 
-      <div className="relative z-10 max-w-4xl w-full text-center space-y-6 md:space-y-8">
+      <div className="relative z-10 max-w-4xl w-full text-center space-y-6 md:space-y-8 my-auto py-6">
         <div className="flex items-center justify-center gap-3 mb-4">
           <div className="bg-gradient-to-tr from-purple-500 to-blue-500 p-2.5 md:p-3 rounded-2xl shadow-lg shadow-purple-500/20">
             <Sparkles className="w-6 h-6 md:w-8 md:h-8 text-white" />
