@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.1.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -73,6 +73,12 @@ def require_user(raw: Request) -> dict:
         raise HTTPException(status_code=401, detail="Login required")
     return user
 
+def check_story_access(story: dict, user: dict):
+    # Orphan stories (creator_id NULL, created before auth) stay readable
+    # by any logged-in user; owned stories are private to their creator.
+    if story.get("creator_id") and story["creator_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="This saga belongs to another author")
+
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
@@ -105,6 +111,24 @@ def me(raw: Request):
 def list_stories(raw: Request):
     user = require_user(raw)
     return db.list_stories_for_user(user["id"])
+
+@router.get("/stories/{story_id}")
+def get_story_detail(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    characters = db.get_story_characters(story_id)
+    return {"story": story, "characters": characters}
+
+@router.get("/stories/{story_id}/messages")
+def get_story_messages(story_id: str, raw: Request, limit: int = 50):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    safe_limit = min(max(int(limit), 1), 200)
+    return db.get_story_messages(story_id, limit=safe_limit)
 
 @router.post("/stories")
 def create_new_story(request: StoryCreateRequest, raw: Request):

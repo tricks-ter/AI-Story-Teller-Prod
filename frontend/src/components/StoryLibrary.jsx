@@ -95,7 +95,9 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
                 </div>
                 <h3 className="text-lg font-semibold text-white truncate">{s.title}</h3>
                 <p className="text-sm text-gray-500 line-clamp-2 mt-1">{s.premise}</p>
-                <p className="text-xs text-gray-400 mt-3">Day {s.current_day} · {s.time_of_day}</p>
+                <p className="text-xs text-gray-400 mt-3 truncate">
+                  {s.character_name ? `${s.character_name}${s.character_role ? ` (${s.character_role})` : ""} · ` : ""}Day {s.current_day} · {s.time_of_day}
+                </p>
               </button>
             ))}
           </div>

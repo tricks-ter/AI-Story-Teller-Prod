@@ -10,7 +10,7 @@ import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
 import { streamChat } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
-import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL } from "./utils/auth";
+import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError } from "./utils/auth";
 
 export default function App() {
   const [view, setView] = useState("landing");
@@ -48,7 +48,6 @@ export default function App() {
   const handleSettingsChange = (next) => setSettings(next);
   const handleToggleThinking = () => setSettings((prev) => ({ ...prev, enableThinking: !prev.enableThinking }));
 
-  // ── Auth-gated navigation ──
   const doStartChat = () => { setView("chat"); handleNewChat(); };
   const doOpenLibrary = () => { setView("library"); };
 
@@ -68,10 +67,31 @@ export default function App() {
 
   const handleLogout = () => { clearAuth(); setUser(null); setStoryContext(null); setView("landing"); };
 
-  const handleOpenStory = (story) => {
+  // ── Resume a saga: seed chat window from the story's DB history ──
+  const handleOpenStory = async (story) => {
     setStoryContext(story);
     setView("chat");
-    handleNewChat();
+    const session = createSession();
+    refreshSessions();
+    setActiveSessionId(session.session_id);
+    setStreamingMsg(null); setStatusText(""); setError(null); setSidebarOpen(false);
+    setMessages([]);
+    try {
+      const res = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=100`, { headers: authHeaders() });
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
+      const seeded = (Array.isArray(data) ? data : []).map(m => ({
+        id: `db-${m.id}`,
+        role: m.role === "system" ? "assistant" : m.role,
+        content: m.content,
+        timestamp: m.created_at
+      }));
+      setMessages(seeded);
+      seeded.forEach(m => appendMessage(session.session_id, m));
+    } catch (err) {
+      console.error("[openStory] error:", err);
+      setError(describeNetworkError(err));
+    }
   };
 
   const handleStartStory = async (storyData) => {
@@ -81,14 +101,14 @@ export default function App() {
         headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(storyData)
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed to create story");
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
       setStoryContext({ ...storyData, id: data.story_id });
       setView("chat");
       handleNewChat();
     } catch (err) {
       console.error("Failed to create story", err);
-      setError(err.message || "Failed to create story. Please try again.");
+      setError(describeNetworkError(err));
       setView("library");
     }
   };
@@ -142,7 +162,11 @@ export default function App() {
           </button>
           <div className="flex-1 min-w-0">
             <h2 className="text-sm font-semibold text-white truncate">{storyContext ? storyContext.title : activeTitle}</h2>
-            <p className="text-xs text-gray-500 hidden sm:block">{storyContext ? "Story Mode Active" : "Advanced reasoning model"}</p>
+            <p className="text-xs text-gray-500 truncate">
+              {storyContext
+                ? `Day ${storyContext.current_day ?? 1} · ${storyContext.time_of_day ?? "Morning"}${storyContext.character_name ? ` · ${storyContext.character_name}` : ""}`
+                : "Advanced reasoning model"}
+            </p>
           </div>
           <button onClick={() => setSettingsOpen(true)} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Settings">
             <Settings2 size={18} />

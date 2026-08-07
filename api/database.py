@@ -167,9 +167,27 @@ class Database:
     def list_stories_for_user(self, user_id):
         if not self.database_url: return []
         return self.execute_query(
-            "SELECT id, title, genre, premise, current_day, time_of_day, is_premium, updated_at "
-            "FROM stories WHERE creator_id = %s ORDER BY updated_at DESC",
+            "SELECT s.id, s.title, s.genre, s.premise, s.current_day, s.time_of_day, s.is_premium, s.updated_at, "
+            "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
+            "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role "
+            "FROM stories s WHERE s.creator_id = %s ORDER BY s.updated_at DESC",
             (user_id,), fetch="all") or []
+
+    def get_story(self, story_id):
+        return self.execute_query(
+            "SELECT * FROM stories WHERE id = %s", (story_id,), fetch="one")
+
+    def get_story_characters(self, story_id):
+        return self.execute_query(
+            "SELECT id, name, role, background, is_player, metadata, created_at "
+            "FROM story_characters WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
+            (story_id,), fetch="all") or []
+
+    def get_story_messages(self, story_id, limit=50):
+        return self.execute_query(
+            "SELECT id, role, content, message_type, created_at "
+            "FROM story_messages WHERE story_id = %s ORDER BY id ASC LIMIT %s",
+            (story_id, int(limit)), fetch="all") or []
 
 db = Database()
 
