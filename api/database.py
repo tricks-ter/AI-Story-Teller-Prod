@@ -1,4 +1,5 @@
 import os
+import threading
 import psycopg2
 from psycopg2 import extras
 import json
@@ -14,99 +15,145 @@ class Database:
         if self.database_url and "sslmode" not in self.database_url:
             separator = "&" if "?" in self.database_url else "?"
             self.database_url += f"{separator}sslmode=require"
+        self._conn = None
+        self._lock = threading.RLock()
 
-    def get_connection(self):
+    # ── Connection lifecycle: ONE reused connection per instance ──
+    def _get_conn(self):
         if not self.database_url: return None
-        try: return psycopg2.connect(self.database_url, connect_timeout=10)
+        if self._conn is not None and not self._conn.closed:
+            return self._conn
+        try:
+            self._conn = psycopg2.connect(self.database_url, connect_timeout=5)
+            return self._conn
         except Exception as e:
             logger.error(f"DB Connection error: {e}")
+            self._conn = None
+            return None
+
+    def _reset_conn(self):
+        try:
+            if self._conn is not None: self._conn.close()
+        except Exception: pass
+        self._conn = None
+
+    def _with_conn(self, fn, commit=False):
+        if not self.database_url: return None
+        with self._lock:
+            last_err = None
+            for attempt in range(2):
+                conn = self._get_conn()
+                if conn is None: return None
+                try:
+                    with conn.cursor(cursor_factory=extras.RealDictCursor) as cur:
+                        result = fn(cur)
+                    if commit: conn.commit()
+                    return result
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    last_err = e
+                    self._reset_conn()
+                except Exception as e:
+                    last_err = e
+                    try: conn.rollback()
+                    except Exception: pass
+                    break
+            logger.error(f"DB Query error: {last_err}")
             return None
 
     def execute_query(self, query, params=None, fetch="all", commit=False):
-        conn = self.get_connection()
-        if not conn: return None
-        try:
-            with conn.cursor(cursor_factory=extras.RealDictCursor) as cur:
-                cur.execute(query, params or ())
-                if fetch == "all": res = cur.fetchall()
-                elif fetch == "one": res = cur.fetchone()
-                else: res = None
-                if commit: conn.commit()
-                return res
-        except Exception as e:
-            try: conn.rollback()
-            except Exception: pass
-            logger.error(f"DB Query error: {e}")
+        def fn(cur):
+            cur.execute(query, params or ())
+            if fetch == "all": return cur.fetchall()
+            if fetch == "one": return cur.fetchone()
             return None
-        finally: conn.close()
+        return self._with_conn(fn, commit=commit)
 
+    # ── All DDL in ONE round-trip (no params → multi-statement is safe) ──
     def init_tables(self):
         if not self.database_url: return
-        queries = [
-            """CREATE TABLE IF NOT EXISTS users (
-                id VARCHAR(36) PRIMARY KEY,
-                username VARCHAR(80) UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                role VARCHAR(20) DEFAULT 'user',
-                metadata JSONB DEFAULT '{}'::jsonb,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb",
-            """CREATE TABLE IF NOT EXISTS auth_tokens (
-                token VARCHAR(128) PRIMARY KEY,
-                user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
-                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
-            """CREATE TABLE IF NOT EXISTS chat_sessions (
-                id VARCHAR(36) PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
-            "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
-            """CREATE TABLE IF NOT EXISTS chat_messages (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(36) REFERENCES chat_sessions(id) ON DELETE CASCADE,
-                role VARCHAR(20) NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                metadata JSONB)""",
-            "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)",
-            """CREATE TABLE IF NOT EXISTS stories (
-                id VARCHAR(36) PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                genre VARCHAR(100),
-                premise TEXT,
-                current_day INT DEFAULT 1,
-                time_of_day VARCHAR(50) DEFAULT 'Morning',
-                creator_id VARCHAR(36),
-                is_premium BOOLEAN DEFAULT FALSE,
-                energy_cost INT DEFAULT 0,
-                metadata JSONB DEFAULT '{}'::jsonb,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
-            """CREATE TABLE IF NOT EXISTS story_characters (
-                id VARCHAR(36) PRIMARY KEY,
-                story_id VARCHAR(36) REFERENCES stories(id) ON DELETE CASCADE,
-                name VARCHAR(255) NOT NULL,
-                role VARCHAR(100),
-                background TEXT,
-                is_player BOOLEAN DEFAULT TRUE,
-                metadata JSONB DEFAULT '{}'::jsonb,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
-            """CREATE TABLE IF NOT EXISTS story_messages (
-                id SERIAL PRIMARY KEY,
-                story_id VARCHAR(36) REFERENCES stories(id) ON DELETE CASCADE,
-                role VARCHAR(20) NOT NULL,
-                content TEXT NOT NULL,
-                message_type VARCHAR(50) DEFAULT 'narration',
-                metadata JSONB DEFAULT '{}'::jsonb,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)"""
-        ]
-        for q in queries:
-            self.execute_query(q, fetch="none", commit=True)
+        ddl = """
+        CREATE TABLE IF NOT EXISTS users (
+            id VARCHAR(36) PRIMARY KEY,
+            username VARCHAR(80) UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role VARCHAR(20) DEFAULT 'user',
+            metadata JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            token VARCHAR(128) PRIMARY KEY,
+            user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id VARCHAR(36) PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(36);
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(36) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            role VARCHAR(20) NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            metadata JSONB);
+        ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS user_id VARCHAR(36);
+        CREATE TABLE IF NOT EXISTS stories (
+            id VARCHAR(36) PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            genre VARCHAR(100),
+            premise TEXT,
+            current_day INT DEFAULT 1,
+            time_of_day VARCHAR(50) DEFAULT 'Morning',
+            creator_id VARCHAR(36),
+            is_premium BOOLEAN DEFAULT FALSE,
+            energy_cost INT DEFAULT 0,
+            metadata JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS story_characters (
+            id VARCHAR(36) PRIMARY KEY,
+            story_id VARCHAR(36) REFERENCES stories(id) ON DELETE CASCADE,
+            name VARCHAR(255) NOT NULL,
+            role VARCHAR(100),
+            background TEXT,
+            is_player BOOLEAN DEFAULT TRUE,
+            metadata JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS story_messages (
+            id SERIAL PRIMARY KEY,
+            story_id VARCHAR(36) REFERENCES stories(id) ON DELETE CASCADE,
+            role VARCHAR(20) NOT NULL,
+            content TEXT NOT NULL,
+            message_type VARCHAR(50) DEFAULT 'narration',
+            metadata JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+        """
+        self.execute_query(ddl, fetch="none", commit=True)
 
     # ── Auth / Users ──
+    def create_user_with_token(self, user_id, username, password_hash, token, expires_at, metadata=None):
+        def fn(cur):
+            cur.execute(
+                "INSERT INTO users (id, username, password_hash, metadata) VALUES (%s, %s, %s, %s)",
+                (user_id, username, password_hash, json.dumps(metadata) if metadata else "{}"))
+            cur.execute(
+                "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+                (token, user_id, expires_at))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    def add_auth_token(self, token, user_id, expires_at):
+        def fn(cur):
+            cur.execute(
+                "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+                (token, user_id, expires_at))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
     def create_user(self, user_id, username, password_hash, metadata=None):
-        self.execute_query(
+        return self.execute_query(
             "INSERT INTO users (id, username, password_hash, metadata) VALUES (%s, %s, %s, %s)",
             (user_id, username, password_hash, json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)

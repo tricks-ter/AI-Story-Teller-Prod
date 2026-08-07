@@ -13,10 +13,9 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from zai import ZaiClient
 
 from database import db
-from core.auth import hash_password, verify_password, create_token, get_user_by_token
+from core.auth import hash_password, verify_password, make_token, get_user_by_token
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -28,7 +27,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.2.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.3.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -74,8 +73,6 @@ def require_user(raw: Request) -> dict:
     return user
 
 def check_story_access(story: dict, user: dict):
-    # Orphan stories (creator_id NULL, created before auth) stay readable
-    # by any logged-in user; owned stories are private to their creator.
     if story.get("creator_id") and story["creator_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="This saga belongs to another author")
 
@@ -89,9 +86,10 @@ def signup(req: AuthRequest):
     if len(req.password) < 6: raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     if db.get_user_by_username(username): raise HTTPException(status_code=409, detail="Username already taken")
     user_id = str(uuid.uuid4())
+    token, expires = make_token(user_id, req.remember_me)
     initial_meta = {"preferences": {}, "energy_credits": 0}
-    db.create_user(user_id, username, hash_password(req.password), metadata=initial_meta)
-    token = create_token(user_id, req.remember_me)
+    ok = db.create_user_with_token(user_id, username, hash_password(req.password), token, expires, metadata=initial_meta)
+    if not ok: raise HTTPException(status_code=500, detail="Could not save account. Please try again.")
     return {"token": token, "user": {"id": user_id, "username": username, "role": "user", "metadata": initial_meta}}
 
 @router.post("/auth/login")
@@ -99,7 +97,8 @@ def login(req: AuthRequest):
     row = db.get_user_by_username(req.username.strip())
     if not row or not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    token = create_token(row["id"], req.remember_me)
+    token, expires = make_token(row["id"], req.remember_me)
+    db.add_auth_token(token, row["id"], expires)
     return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"], "metadata": row.get("metadata") or {}}}
 
 @router.get("/auth/me")
@@ -118,8 +117,7 @@ def get_story_detail(story_id: str, raw: Request):
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
-    characters = db.get_story_characters(story_id)
-    return {"story": story, "characters": characters}
+    return {"story": story, "characters": db.get_story_characters(story_id)}
 
 @router.get("/stories/{story_id}/messages")
 def get_story_messages(story_id: str, raw: Request, limit: int = 50):
@@ -127,8 +125,7 @@ def get_story_messages(story_id: str, raw: Request, limit: int = 50):
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
-    safe_limit = min(max(int(limit), 1), 200)
-    return db.get_story_messages(story_id, limit=safe_limit)
+    return db.get_story_messages(story_id, limit=min(max(int(limit), 1), 200))
 
 @router.post("/stories")
 def create_new_story(request: StoryCreateRequest, raw: Request):
@@ -155,6 +152,7 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest, raw: Request):
+    from zai import ZaiClient  # lazy import: keeps auth/signup cold starts fast
     if not request.messages: raise HTTPException(status_code=400, detail="messages must not be empty")
     user = get_auth_user(raw)
     uid = user["id"] if user else None

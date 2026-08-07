@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowLeft, LogIn, UserPlus, AlertCircle } from 'lucide-react';
+import { ArrowLeft, LogIn, UserPlus, AlertCircle, Loader2 } from 'lucide-react';
 import { BASE_URL, saveAuth, parseJsonSafe, friendlyHttp, describeNetworkError } from '../utils/auth';
 
 export default function AuthPage({ onAuthed, onBack }) {
@@ -8,35 +8,63 @@ export default function AuthPage({ onAuthed, onBack }) {
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState(null);
+  const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const submit = async (e) => {
-    e.preventDefault();
-    setError(null);
-    setBusy(true);
-    try { document.activeElement && document.activeElement.blur(); } catch {}
-
+  const doRequest = async (m) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
-      const res = await fetch(`${BASE_URL}/auth/${mode}`, {
+      const res = await fetch(`${BASE_URL}/auth/${m}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password, remember_me: remember }),
         signal: controller.signal
       });
       const data = await parseJsonSafe(res);
-      if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
-      if (!data.token || !data.user) throw new Error('Malformed server response (missing token).');
-      saveAuth(data.token, data.user, remember);
-      onAuthed(data.user);
-    } catch (err) {
-      console.error('[auth] error:', err);
-      setError(describeNetworkError(err));
+      return { res, data };
     } finally {
       clearTimeout(timer);
-      setBusy(false);
     }
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setStatus(null);
+    setBusy(true);
+    try { document.activeElement && document.activeElement.blur(); } catch {}
+
+    let m = mode;
+    let hadRetry = false;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const { res, data } = await doRequest(m);
+
+        if (res.status === 409 && m === 'signup' && hadRetry) {
+          setStatus('Account already created — signing you in…');
+          m = 'login';
+          continue;
+        }
+        if (!res.ok) { setError(friendlyHttp(res.status, data?.detail)); break; }
+        if (!data.token || !data.user) { setError('Malformed server response (missing token).'); break; }
+        saveAuth(data.token, data.user, remember);
+        onAuthed(data.user);
+        break;
+      } catch (err) {
+        console.error('[auth] error:', err);
+        const retryable = err?.name === 'AbortError' || err?.message === 'Failed to fetch';
+        if (attempt === 1 && retryable) {
+          hadRetry = true;
+          setStatus('Server is waking up (cold start) — retrying automatically…');
+          continue;
+        }
+        setError(describeNetworkError(err));
+        break;
+      }
+    }
+    setBusy(false);
   };
 
   return (
@@ -99,15 +127,22 @@ export default function AuthPage({ onAuthed, onBack }) {
             disabled={busy}
             className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:opacity-90 text-white font-bold py-3.5 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50 touch-manipulation active:scale-95"
           >
-            {mode === 'login' ? <LogIn className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : mode === 'login' ? <LogIn className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
             {busy ? 'Please wait…' : mode === 'login' ? 'Sign In' : 'Sign Up'}
           </button>
+
+          {status && (
+            <p className="text-xs text-amber-400 text-center">{status}</p>
+          )}
+          {busy && !status && (
+            <p className="text-xs text-gray-600 text-center">First request after idle may take a few seconds (serverless wake-up).</p>
+          )}
         </form>
 
         <p className="text-center text-sm text-gray-500 mt-6">
           {mode === 'login' ? 'New to InkMind?' : 'Already have an account?'}{' '}
           <button
-            onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(null); }}
+            onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(null); setStatus(null); }}
             className="text-purple-400 font-medium hover:underline touch-manipulation"
           >
             {mode === 'login' ? 'Create an account' : 'Sign in'}

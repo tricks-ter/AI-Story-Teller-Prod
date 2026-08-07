@@ -21,14 +21,13 @@ def verify_password(password: str, stored: str) -> bool:
         return False
     return secrets.compare_digest(hash_password(password, salt), stored)
 
-def create_token(user_id: str, remember_me: bool) -> str:
+def make_token(user_id: str, remember_me: bool):
+    # Pure generation — DB write happens in the SAME transaction as the user
+    # insert (see db.create_user_with_token), saving a full round-trip.
     token = secrets.token_urlsafe(32)
     hours = 24 * 30 if remember_me else 12
     expires = datetime.now(timezone.utc) + timedelta(hours=hours)
-    db.execute_query(
-        "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
-        (token, user_id, expires), fetch="none", commit=True)
-    return token
+    return token, expires
 
 def get_user_by_token(token: str):
     if not token: return None
