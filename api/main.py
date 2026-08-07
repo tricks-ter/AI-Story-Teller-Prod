@@ -1,4 +1,7 @@
 # api/main.py
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
 import traceback
 from fastapi import FastAPI, HTTPException
@@ -7,9 +10,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import AsyncGenerator, List
 import asyncio
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # DO NOT import zai, psycopg2, or database here globally! 
 app = FastAPI()
