@@ -1,9 +1,8 @@
-# api/main.py
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import json
-import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -11,7 +10,6 @@ from pydantic import BaseModel, Field
 from typing import AsyncGenerator, List
 import asyncio
 
-# DO NOT import zai, psycopg2, or database here globally! 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
@@ -29,7 +27,6 @@ class ChatRequest(BaseModel):
 
 @app.get("/api/health")
 def health():
-    # DIAGNOSTIC: Test imports dynamically to catch the silent Vercel crash
     diagnostics = {}
     try:
         from zai import ZaiClient
@@ -49,7 +46,6 @@ def health():
     except Exception as e:
         diagnostics["database_module"] = f"FAILED: {str(e)}"
 
-    # If ANY critical module failed, return the exact error as JSON instead of crashing
     if "FAILED" in str(diagnostics):
         return JSONResponse(status_code=500, content={"status": "CRITICAL IMPORT FAILURE", "diagnostics": diagnostics})
 
@@ -62,7 +58,6 @@ async def chat_stream(request: ChatRequest):
     async def generate() -> AsyncGenerator[str, None]:
         yield f"data: {json.dumps({'type': 'status', 'message': 'Connecting...'})}\n\n"
         
-        # Lazy load everything inside the generator
         try:
             import database
             from zai import ZaiClient
