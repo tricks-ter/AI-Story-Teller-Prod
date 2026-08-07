@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -83,9 +83,10 @@ def signup(req: AuthRequest):
     if len(req.password) < 6: raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     if db.get_user_by_username(username): raise HTTPException(status_code=409, detail="Username already taken")
     user_id = str(uuid.uuid4())
-    db.create_user(user_id, username, hash_password(req.password))
+    initial_meta = {"preferences": {}, "energy_credits": 0}
+    db.create_user(user_id, username, hash_password(req.password), metadata=initial_meta)
     token = create_token(user_id, req.remember_me)
-    return {"token": token, "user": {"id": user_id, "username": username, "role": "user"}}
+    return {"token": token, "user": {"id": user_id, "username": username, "role": "user", "metadata": initial_meta}}
 
 @router.post("/auth/login")
 def login(req: AuthRequest):
@@ -93,12 +94,12 @@ def login(req: AuthRequest):
     if not row or not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     token = create_token(row["id"], req.remember_me)
-    return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"]}}
+    return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"], "metadata": row.get("metadata") or {}}}
 
 @router.get("/auth/me")
 def me(raw: Request):
     user = require_user(raw)
-    return user
+    return {"id": user["id"], "username": user["username"], "role": user["role"], "metadata": user.get("metadata") or {}}
 
 @router.get("/stories")
 def list_stories(raw: Request):

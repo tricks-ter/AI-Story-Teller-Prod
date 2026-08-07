@@ -48,7 +48,9 @@ class Database:
                 username VARCHAR(80) UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 role VARCHAR(20) DEFAULT 'user',
+                metadata JSONB DEFAULT '{}'::jsonb,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb",
             """CREATE TABLE IF NOT EXISTS auth_tokens (
                 token VARCHAR(128) PRIMARY KEY,
                 user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
@@ -102,21 +104,28 @@ class Database:
         for q in queries:
             self.execute_query(q, fetch="none", commit=True)
 
-    # ── Auth ──
-    def create_user(self, user_id, username, password_hash):
+    # ── Auth / Users ──
+    def create_user(self, user_id, username, password_hash, metadata=None):
         self.execute_query(
-            "INSERT INTO users (id, username, password_hash) VALUES (%s, %s, %s)",
-            (user_id, username, password_hash), fetch="none", commit=True)
+            "INSERT INTO users (id, username, password_hash, metadata) VALUES (%s, %s, %s, %s)",
+            (user_id, username, password_hash, json.dumps(metadata) if metadata else "{}"),
+            fetch="none", commit=True)
 
     def get_user_by_username(self, username):
         return self.execute_query(
-            "SELECT id, username, password_hash, role FROM users WHERE username = %s",
+            "SELECT id, username, password_hash, role, metadata FROM users WHERE username = %s",
             (username,), fetch="one")
 
     def get_user_by_id(self, user_id):
         return self.execute_query(
-            "SELECT id, username, role FROM users WHERE id = %s",
+            "SELECT id, username, role, metadata FROM users WHERE id = %s",
             (user_id,), fetch="one")
+
+    def update_user_metadata(self, user_id, metadata):
+        self.execute_query(
+            "UPDATE users SET metadata = %s WHERE id = %s",
+            (json.dumps(metadata) if metadata is not None else "{}", user_id),
+            fetch="none", commit=True)
 
     # ── Quick Chat ──
     def ensure_session(self, session_id, title="New Chat", user_id=None):

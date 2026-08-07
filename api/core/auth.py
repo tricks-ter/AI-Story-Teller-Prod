@@ -33,7 +33,7 @@ def create_token(user_id: str, remember_me: bool) -> str:
 def get_user_by_token(token: str):
     if not token: return None
     return db.execute_query(
-        "SELECT u.id, u.username, u.role FROM auth_tokens t "
+        "SELECT u.id, u.username, u.role, u.metadata FROM auth_tokens t "
         "JOIN users u ON u.id = t.user_id "
         "WHERE t.token = %s AND t.expires_at > NOW()",
         (token,), fetch="one")
