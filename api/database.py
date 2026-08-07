@@ -1,10 +1,7 @@
 # api/database.py
-import os
-import psycopg2
+import os, psycopg2, json, logging
 from psycopg2 import extras
-import json
 from dotenv import load_dotenv
-import logging
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -18,7 +15,9 @@ class Database:
 
     def get_connection(self):
         if not self.database_url: return None
-        try: return psycopg2.connect(self.database_url, connect_timeout=10)
+        try: 
+            # connect_timeout prevents infinite hanging if Neon is unreachable
+            return psycopg2.connect(self.database_url, connect_timeout=5)
         except Exception as e:
             logger.error(f"DB Connection error: {e}")
             return None
@@ -36,47 +35,35 @@ class Database:
                 return res
         except Exception as e:
             try: conn.rollback()
-            except Exception: pass
+            except: pass
             logger.error(f"DB Query error: {e}")
-            return None          # ← degrade gracefully, NEVER crash the chat
-        finally: conn.close()
+            return None
+        finally: 
+            try: conn.close()
+            except: pass
 
     def init_tables(self):
         if not self.database_url: return
         queries = [
             """CREATE TABLE IF NOT EXISTS chat_sessions (
-                id VARCHAR(36) PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
+                id VARCHAR(36) PRIMARY KEY, title VARCHAR(255) NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)""",
             """CREATE TABLE IF NOT EXISTS chat_messages (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(36) REFERENCES chat_sessions(id) ON DELETE CASCADE,
-                role VARCHAR(20) NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                metadata JSONB)"""
+                id SERIAL PRIMARY KEY, session_id VARCHAR(36) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                role VARCHAR(20) NOT NULL, content TEXT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, metadata JSONB)"""
         ]
-        for q in queries:
-            self.execute_query(q, fetch="none", commit=True)
+        for q in queries: self.execute_query(q, fetch="none", commit=True)
 
     def ensure_session(self, session_id, title="New Chat"):
         if not self.database_url: return
-        self.execute_query(
-            "INSERT INTO chat_sessions (id, title) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
-            (session_id, title), fetch="none", commit=True)
+        self.execute_query("INSERT INTO chat_sessions (id, title) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING", (session_id, title), fetch="none", commit=True)
 
     def add_message(self, session_id, role, content, metadata=None):
         if not self.database_url: return
-        self.execute_query(
-            "INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (%s, %s, %s, %s)",
-            (session_id, role, content, json.dumps(metadata) if metadata else None),
-            fetch="none", commit=True)
+        self.execute_query("INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (%s, %s, %s, %s)", (session_id, role, content, json.dumps(metadata) if metadata else None), fetch="none", commit=True)
 
 db = Database()
-
-# ✅ Runs on every Vercel cold start (lifespan events never fire on serverless)
-try:
-    db.init_tables()
-except Exception as e:
-    logger.error(f"DB init warning: {e}")
+try: db.init_tables()
+except Exception as e: logger.error(f"DB init warning: {e}")
