@@ -197,8 +197,8 @@ async def chat_stream(request: ChatRequest, req: Request):
         try:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-                model=request.model, messages=history, stream=True,
-                max_tokens=request.max_tokens, temperature=request.temperature,
+                model=(request.model if request.model in ("glm-4.7-flash", "glm-4.5-flash", "glm-4-flash") else "glm-4.7-flash"), messages=history, stream=True,
+                max_tokens=request.max_tokens, temperature=min(request.temperature, 1.0),
                 thinking={"type": "enabled" if request.enable_thinking else "disabled"}
             ))
             for chunk in response:

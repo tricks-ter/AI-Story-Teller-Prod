@@ -171,7 +171,7 @@ export default function SettingsPanel({ settings, onChange, onClose }) {
               </span>
             </div>
             <Slider
-              min={256}
+              min={1024}
               max={8192}
               step={256}
               value={settings.maxTokens}
@@ -196,7 +196,7 @@ export default function SettingsPanel({ settings, onChange, onClose }) {
             </div>
             <Slider
               min={0}
-              max={1.5}
+              max={1.0}
               step={0.1}
               value={settings.temperature}
               onChange={(v) => update("temperature", parseFloat(v.toFixed(1)))}
