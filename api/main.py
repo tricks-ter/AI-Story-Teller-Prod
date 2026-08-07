@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from database import db
+from database import db, LEGACY_USER_ID
 from core.auth import hash_password, verify_password, make_token, get_user_by_token
 
 load_dotenv()
@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.3.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.3.1", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -73,7 +73,10 @@ def require_user(raw: Request) -> dict:
     return user
 
 def check_story_access(story: dict, user: dict):
-    if story.get("creator_id") and story["creator_id"] != user["id"]:
+    # Legacy (pre-auth) sagas stay readable for every logged-in user;
+    # owned sagas remain private to their creator.
+    owner = story.get("creator_id")
+    if owner and owner != user["id"] and owner != LEGACY_USER_ID:
         raise HTTPException(status_code=403, detail="This saga belongs to another author")
 
 @router.get("/health")
@@ -152,7 +155,7 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest, raw: Request):
-    from zai import ZaiClient  # lazy import: keeps auth/signup cold starts fast
+    from zai import ZaiClient
     if not request.messages: raise HTTPException(status_code=400, detail="messages must not be empty")
     user = get_auth_user(raw)
     uid = user["id"] if user else None

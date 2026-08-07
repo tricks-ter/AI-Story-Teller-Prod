@@ -9,6 +9,8 @@ import logging
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+LEGACY_USER_ID = "legacy-system"
+
 class Database:
     def __init__(self):
         self.database_url = os.getenv("DATABASE_URL")
@@ -18,7 +20,6 @@ class Database:
         self._conn = None
         self._lock = threading.RLock()
 
-    # ── Connection lifecycle: ONE reused connection per instance ──
     def _get_conn(self):
         if not self.database_url: return None
         if self._conn is not None and not self._conn.closed:
@@ -68,69 +69,138 @@ class Database:
             return None
         return self._with_conn(fn, commit=commit)
 
-    # ── All DDL in ONE round-trip (no params → multi-statement is safe) ──
     def init_tables(self):
         if not self.database_url: return
+
+        # 1) Reserved system account for pre-auth legacy rows (can never log in)
+        self.execute_query(
+            "INSERT INTO users (id, username, password_hash, role, metadata) "
+            "VALUES ('legacy-system', 'legacy-system', '!', 'user', '{}'::jsonb) "
+            "ON CONFLICT (id) DO NOTHING", fetch="none", commit=True)
+
+        # 2) Fresh installs: full NOT NULL schema
         ddl = """
         CREATE TABLE IF NOT EXISTS users (
             id VARCHAR(36) PRIMARY KEY,
             username VARCHAR(80) UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            role VARCHAR(20) DEFAULT 'user',
-            metadata JSONB DEFAULT '{}'::jsonb,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+            role VARCHAR(20) NOT NULL DEFAULT 'user',
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS auth_tokens (
             token VARCHAR(128) PRIMARY KEY,
-            user_id VARCHAR(36) REFERENCES users(id) ON DELETE CASCADE,
+            user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id VARCHAR(36) PRIMARY KEY,
             title VARCHAR(255) NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
-        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(36);
+            user_id VARCHAR(36) NOT NULL DEFAULT 'legacy-system',
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS chat_messages (
             id SERIAL PRIMARY KEY,
-            session_id VARCHAR(36) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            session_id VARCHAR(36) NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
             role VARCHAR(20) NOT NULL,
             content TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            metadata JSONB);
-        ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS user_id VARCHAR(36);
+            user_id VARCHAR(36) NOT NULL DEFAULT 'legacy-system',
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS stories (
             id VARCHAR(36) PRIMARY KEY,
             title VARCHAR(255) NOT NULL,
-            genre VARCHAR(100),
-            premise TEXT,
-            current_day INT DEFAULT 1,
-            time_of_day VARCHAR(50) DEFAULT 'Morning',
-            creator_id VARCHAR(36),
-            is_premium BOOLEAN DEFAULT FALSE,
-            energy_cost INT DEFAULT 0,
-            metadata JSONB DEFAULT '{}'::jsonb,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+            genre VARCHAR(100) NOT NULL DEFAULT 'Unknown',
+            premise TEXT NOT NULL DEFAULT '',
+            current_day INT NOT NULL DEFAULT 1,
+            time_of_day VARCHAR(50) NOT NULL DEFAULT 'Morning',
+            creator_id VARCHAR(36) NOT NULL DEFAULT 'legacy-system',
+            is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+            energy_cost INT NOT NULL DEFAULT 0,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS story_characters (
             id VARCHAR(36) PRIMARY KEY,
-            story_id VARCHAR(36) REFERENCES stories(id) ON DELETE CASCADE,
+            story_id VARCHAR(36) NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
             name VARCHAR(255) NOT NULL,
-            role VARCHAR(100),
-            background TEXT,
-            is_player BOOLEAN DEFAULT TRUE,
-            metadata JSONB DEFAULT '{}'::jsonb,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+            role VARCHAR(100) NOT NULL DEFAULT 'Character',
+            background TEXT NOT NULL DEFAULT '',
+            is_player BOOLEAN NOT NULL DEFAULT TRUE,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS story_messages (
             id SERIAL PRIMARY KEY,
-            story_id VARCHAR(36) REFERENCES stories(id) ON DELETE CASCADE,
+            story_id VARCHAR(36) NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
             role VARCHAR(20) NOT NULL,
             content TEXT NOT NULL,
-            message_type VARCHAR(50) DEFAULT 'narration',
-            metadata JSONB DEFAULT '{}'::jsonb,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);
+            message_type VARCHAR(50) NOT NULL DEFAULT 'narration',
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         """
         self.execute_query(ddl, fetch="none", commit=True)
+
+        # 3) Existing installs: backfill NULLs, then lock columns (per-table isolation)
+        migrations = [
+            """UPDATE users SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+               UPDATE users SET role = 'user' WHERE role IS NULL;
+               ALTER TABLE users ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+               ALTER TABLE users ALTER COLUMN metadata SET NOT NULL;
+               ALTER TABLE users ALTER COLUMN role SET DEFAULT 'user';
+               ALTER TABLE users ALTER COLUMN role SET NOT NULL;""",
+            """UPDATE chat_sessions SET user_id = 'legacy-system' WHERE user_id IS NULL;
+               ALTER TABLE chat_sessions ALTER COLUMN user_id SET DEFAULT 'legacy-system';
+               ALTER TABLE chat_sessions ALTER COLUMN user_id SET NOT NULL;""",
+            """UPDATE chat_messages SET user_id = 'legacy-system' WHERE user_id IS NULL;
+               UPDATE chat_messages SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+               ALTER TABLE chat_messages ALTER COLUMN user_id SET DEFAULT 'legacy-system';
+               ALTER TABLE chat_messages ALTER COLUMN user_id SET NOT NULL;
+               ALTER TABLE chat_messages ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+               ALTER TABLE chat_messages ALTER COLUMN metadata SET NOT NULL;""",
+            """UPDATE stories SET creator_id = 'legacy-system' WHERE creator_id IS NULL;
+               UPDATE stories SET genre = 'Unknown' WHERE genre IS NULL;
+               UPDATE stories SET premise = '' WHERE premise IS NULL;
+               UPDATE stories SET current_day = 1 WHERE current_day IS NULL;
+               UPDATE stories SET time_of_day = 'Morning' WHERE time_of_day IS NULL;
+               UPDATE stories SET is_premium = FALSE WHERE is_premium IS NULL;
+               UPDATE stories SET energy_cost = 0 WHERE energy_cost IS NULL;
+               UPDATE stories SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+               ALTER TABLE stories ALTER COLUMN creator_id SET DEFAULT 'legacy-system';
+               ALTER TABLE stories ALTER COLUMN creator_id SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN genre SET DEFAULT 'Unknown';
+               ALTER TABLE stories ALTER COLUMN genre SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN premise SET DEFAULT '';
+               ALTER TABLE stories ALTER COLUMN premise SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN current_day SET DEFAULT 1;
+               ALTER TABLE stories ALTER COLUMN current_day SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN time_of_day SET DEFAULT 'Morning';
+               ALTER TABLE stories ALTER COLUMN time_of_day SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN is_premium SET DEFAULT FALSE;
+               ALTER TABLE stories ALTER COLUMN is_premium SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN energy_cost SET DEFAULT 0;
+               ALTER TABLE stories ALTER COLUMN energy_cost SET NOT NULL;
+               ALTER TABLE stories ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+               ALTER TABLE stories ALTER COLUMN metadata SET NOT NULL;""",
+            """UPDATE story_characters SET role = 'Character' WHERE role IS NULL;
+               UPDATE story_characters SET background = '' WHERE background IS NULL;
+               UPDATE story_characters SET is_player = TRUE WHERE is_player IS NULL;
+               UPDATE story_characters SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+               ALTER TABLE story_characters ALTER COLUMN role SET DEFAULT 'Character';
+               ALTER TABLE story_characters ALTER COLUMN role SET NOT NULL;
+               ALTER TABLE story_characters ALTER COLUMN background SET DEFAULT '';
+               ALTER TABLE story_characters ALTER COLUMN background SET NOT NULL;
+               ALTER TABLE story_characters ALTER COLUMN is_player SET DEFAULT TRUE;
+               ALTER TABLE story_characters ALTER COLUMN is_player SET NOT NULL;
+               ALTER TABLE story_characters ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+               ALTER TABLE story_characters ALTER COLUMN metadata SET NOT NULL;""",
+            """UPDATE story_messages SET message_type = 'narration' WHERE message_type IS NULL;
+               UPDATE story_messages SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+               ALTER TABLE story_messages ALTER COLUMN message_type SET DEFAULT 'narration';
+               ALTER TABLE story_messages ALTER COLUMN message_type SET NOT NULL;
+               ALTER TABLE story_messages ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+               ALTER TABLE story_messages ALTER COLUMN metadata SET NOT NULL;"""
+        ]
+        for m in migrations:
+            self.execute_query(m, fetch="none", commit=True)
 
     # ── Auth / Users ──
     def create_user_with_token(self, user_id, username, password_hash, token, expires_at, metadata=None):
@@ -177,38 +247,41 @@ class Database:
     # ── Quick Chat ──
     def ensure_session(self, session_id, title="New Chat", user_id=None):
         if not self.database_url: return
+        uid = user_id or LEGACY_USER_ID
         self.execute_query(
             "INSERT INTO chat_sessions (id, title, user_id) VALUES (%s, %s, %s) "
             "ON CONFLICT (id) DO UPDATE SET user_id = COALESCE(EXCLUDED.user_id, chat_sessions.user_id)",
-            (session_id, title, user_id), fetch="none", commit=True)
+            (session_id, title, uid), fetch="none", commit=True)
 
     def add_message(self, session_id, role, content, metadata=None, user_id=None):
         if not self.database_url: return
+        uid = user_id or LEGACY_USER_ID
         self.execute_query(
             "INSERT INTO chat_messages (session_id, role, content, metadata, user_id) VALUES (%s, %s, %s, %s, %s)",
-            (session_id, role, content, json.dumps(metadata) if metadata else None, user_id),
+            (session_id, role, content, json.dumps(metadata) if metadata else "{}", uid),
             fetch="none", commit=True)
 
     # ── Stories ──
     def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None):
         if not self.database_url: return
+        cid = creator_id or LEGACY_USER_ID
         self.execute_query(
             "INSERT INTO stories (id, title, genre, premise, metadata, creator_id) VALUES (%s, %s, %s, %s, %s, %s)",
-            (story_id, title, genre, premise, json.dumps(metadata) if metadata else "{}", creator_id),
+            (story_id, title, genre, premise, json.dumps(metadata) if metadata else "{}", cid),
             fetch="none", commit=True)
 
     def add_story_character(self, char_id, story_id, name, role, background, metadata=None):
         if not self.database_url: return
         self.execute_query(
             "INSERT INTO story_characters (id, story_id, name, role, background, metadata) VALUES (%s, %s, %s, %s, %s, %s)",
-            (char_id, story_id, name, role, background, json.dumps(metadata) if metadata else "{}"),
+            (char_id, story_id, name, role or "Character", background or "", json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
     def add_story_message(self, story_id, role, content, msg_type="narration", metadata=None):
         if not self.database_url: return
         self.execute_query(
             "INSERT INTO story_messages (story_id, role, content, message_type, metadata) VALUES (%s, %s, %s, %s, %s)",
-            (story_id, role, content, msg_type, json.dumps(metadata) if metadata else "{}"),
+            (story_id, role, content, msg_type or "narration", json.dumps(metadata) if metadata else "{}"),
             fetch="none", commit=True)
 
     def list_stories_for_user(self, user_id):
