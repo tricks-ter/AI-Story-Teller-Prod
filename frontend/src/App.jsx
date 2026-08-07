@@ -10,7 +10,7 @@ import { streamChat } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 
 export default function App() {
-  const [view, setView] = useState("landing"); // 'landing', 'storySetup', 'chat'
+  const [view, setView] = useState("landing");
   const [storyContext, setStoryContext] = useState(null);
 
   const [sessions, setSessions] = useState([]);
@@ -34,20 +34,25 @@ export default function App() {
   const handleNewChat = () => { const session = createSession(); refreshSessions(); setActiveSessionId(session.session_id); setMessages([]); setStreamingMsg(null); setStatusText(""); setError(null); setSidebarOpen(false); };
   const handleDeleteSession = (sessionId) => { deleteSession(sessionId); refreshSessions(); if (activeSessionId === sessionId) { setActiveSessionId(null); setMessages([]); setStreamingMsg(null); } };
   const handleSettingsChange = (next) => setSettings(next);
-  
-  const handleToggleThinking = () =>
-    setSettings((prev) => ({ ...prev, enableThinking: !prev.enableThinking }));
+  const handleToggleThinking = () => setSettings((prev) => ({ ...prev, enableThinking: !prev.enableThinking }));
 
-  // Gateway Handlers
-  const handleStartChat = () => {
-    setView("chat");
-    handleNewChat();
-  };
+  const handleStartChat = () => { setView("chat"); handleNewChat(); };
 
-  const handleStartStory = (storyData) => {
-    setStoryContext(storyData);
-    setView("chat");
-    handleNewChat();
+  const handleStartStory = async (storyData) => {
+    try {
+      const res = await fetch("/api/stories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(storyData)
+      });
+      const data = await res.json();
+      setStoryContext({ ...storyData, id: data.story_id });
+      setView("chat");
+      handleNewChat();
+    } catch (err) {
+      console.error("Failed to create story", err);
+      setError("Failed to create story. Please try again.");
+    }
   };
 
   const sendMessage = useCallback((text) => {
@@ -79,17 +84,9 @@ export default function App() {
   const handleStop = () => { if (stopRef.current) { stopRef.current(); stopRef.current = null; } if (streamingMsg) { appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }); setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]); } setStreamingMsg(null); setIsStreaming(false); setStatusText(""); };
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
 
-  // 1. Render Landing Page
-  if (view === "landing") {
-    return <LandingPage onSelectChat={handleStartChat} onSelectStory={() => setView("storySetup")} />;
-  }
+  if (view === "landing") return <LandingPage onSelectChat={handleStartChat} onSelectStory={() => setView("storySetup")} />;
+  if (view === "storySetup") return <StoryCreator onStart={handleStartStory} onBack={() => setView("landing")} />;
 
-  // 2. Render Story Creator
-  if (view === "storySetup") {
-    return <StoryCreator onStart={handleStartStory} onBack={() => setView("landing")} />;
-  }
-
-  // 3. Render Chat Interface
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">
       {sidebarOpen && <div className="fixed inset-0 bg-black/60 z-20 md:hidden" onClick={() => setSidebarOpen(false)} />}
@@ -100,11 +97,7 @@ export default function App() {
           <button onClick={() => setSidebarOpen((o) => !o)} className="md:hidden p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center touch-manipulation">
             {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <button 
-             onClick={() => setView("landing")} 
-             className="p-2.5 rounded-xl hover:bg-gray-800 text-purple-400 hover:text-purple-300 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" 
-             title="Back to Hub"
-          >
+          <button onClick={() => setView("landing")} className="p-2.5 rounded-xl hover:bg-gray-800 text-purple-400 hover:text-purple-300 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Back to Hub">
             <Home size={18} />
           </button>
           <div className="flex-1 min-w-0">
