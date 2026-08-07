@@ -1,26 +1,22 @@
 import os
 import sys
 
-# ── Vercel serverless import bootstrap ─────────────────────────────
-# On Vercel the function may run with a cwd / sys.path that does NOT
-# include the api/ directory, so sibling imports (database.py, core/)
-# raise ModuleNotFoundError -> 500 FUNCTION_INVOCATION_FAILED.
-# Fix: put this file's directory on sys.path BEFORE any local import.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 import json, logging, uuid
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from zai import ZaiClient
 
 from database import db
+from core.auth import hash_password, verify_password, create_token, get_user_by_token
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -32,7 +28,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="2.2.1", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -58,13 +54,60 @@ class StoryCreateRequest(BaseModel):
     characterRole: str
     characterBackground: str
 
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+    remember_me: bool = False
+
 router = APIRouter(prefix="/api")
+
+def get_auth_user(raw: Request) -> Optional[dict]:
+    header = raw.headers.get("authorization", "")
+    if header.startswith("Bearer "):
+        return get_user_by_token(header[7:].strip())
+    return None
+
+def require_user(raw: Request) -> dict:
+    user = get_auth_user(raw)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    return user
 
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
+@router.post("/auth/signup")
+def signup(req: AuthRequest):
+    username = req.username.strip()
+    if len(username) < 3: raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if len(req.password) < 6: raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if db.get_user_by_username(username): raise HTTPException(status_code=409, detail="Username already taken")
+    user_id = str(uuid.uuid4())
+    db.create_user(user_id, username, hash_password(req.password))
+    token = create_token(user_id, req.remember_me)
+    return {"token": token, "user": {"id": user_id, "username": username, "role": "user"}}
+
+@router.post("/auth/login")
+def login(req: AuthRequest):
+    row = db.get_user_by_username(req.username.strip())
+    if not row or not verify_password(req.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = create_token(row["id"], req.remember_me)
+    return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"]}}
+
+@router.get("/auth/me")
+def me(raw: Request):
+    user = require_user(raw)
+    return user
+
+@router.get("/stories")
+def list_stories(raw: Request):
+    user = require_user(raw)
+    return db.list_stories_for_user(user["id"])
+
 @router.post("/stories")
-def create_new_story(request: StoryCreateRequest):
+def create_new_story(request: StoryCreateRequest, raw: Request):
+    user = require_user(raw)
     story_id = str(uuid.uuid4())
     char_id = str(uuid.uuid4())
 
@@ -72,13 +115,12 @@ def create_new_story(request: StoryCreateRequest):
         "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
         "rules": "Keep responses immersive and descriptive."
     }
-
     char_meta = {
         "stats": {"Health": 100, "Mana": 50},
         "inventory": ["Starter Item"]
     }
 
-    db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta)
+    db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta, creator_id=user["id"])
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole, request.characterBackground, metadata=char_meta)
 
     intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
@@ -87,12 +129,15 @@ def create_new_story(request: StoryCreateRequest):
     return {"story_id": story_id, "status": "created", "title": request.title}
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, raw: Request):
     if not request.messages: raise HTTPException(status_code=400, detail="messages must not be empty")
+    user = get_auth_user(raw)
+    uid = user["id"] if user else None
+
     last_msg = request.messages[-1]
     if last_msg.role == "user":
-        db.ensure_session(request.session_id, last_msg.content[:50] if len(last_msg.content) > 50 else "New Chat")
-        db.add_message(request.session_id, "user", last_msg.content)
+        db.ensure_session(request.session_id, last_msg.content[:50] if len(last_msg.content) > 50 else "New Chat", user_id=uid)
+        db.add_message(request.session_id, "user", last_msg.content, user_id=uid)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None
     history = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -122,7 +167,7 @@ async def chat_stream(request: ChatRequest):
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-        if full_content: db.add_message(request.session_id, "assistant", full_content)
+        if full_content: db.add_message(request.session_id, "assistant", full_content, user_id=uid)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

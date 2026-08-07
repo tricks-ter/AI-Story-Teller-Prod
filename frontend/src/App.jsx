@@ -6,12 +6,17 @@ import ChatInput from "./components/ChatInput";
 import SettingsPanel from "./components/SettingsPanel";
 import LandingPage from "./components/LandingPage";
 import StoryCreator from "./components/StoryCreator";
+import AuthPage from "./components/AuthPage";
+import StoryLibrary from "./components/StoryLibrary";
 import { streamChat } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
+import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL } from "./utils/auth";
 
 export default function App() {
   const [view, setView] = useState("landing");
   const [storyContext, setStoryContext] = useState(null);
+  const [user, setUser] = useState(getSavedUser());
+  const [pendingAction, setPendingAction] = useState(null);
 
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
@@ -28,6 +33,13 @@ export default function App() {
 
   useEffect(() => { setSessions(listSessions()); }, []);
   useEffect(() => { saveSettings(settings); }, [settings]);
+
+  useEffect(() => {
+    if (getToken()) {
+      fetchMe().then(u => { if (u) setUser(u); else { clearAuth(); setUser(null); } });
+    }
+  }, []);
+
   const refreshSessions = () => setSessions(listSessions());
 
   const handleSelectSession = (sessionId) => { setActiveSessionId(sessionId); setMessages(getMessages(sessionId)); setStreamingMsg(null); setStatusText(""); setError(null); setSidebarOpen(false); };
@@ -36,22 +48,48 @@ export default function App() {
   const handleSettingsChange = (next) => setSettings(next);
   const handleToggleThinking = () => setSettings((prev) => ({ ...prev, enableThinking: !prev.enableThinking }));
 
-  const handleStartChat = () => { setView("chat"); handleNewChat(); };
+  // ── Auth-gated navigation ──
+  const doStartChat = () => { setView("chat"); handleNewChat(); };
+  const doOpenLibrary = () => { setView("library"); };
+
+  const requireAuth = (action) => {
+    if (user) { action === "chat" ? doStartChat() : doOpenLibrary(); }
+    else { setPendingAction(action); setView("auth"); }
+  };
+
+  const handleAuthed = (u) => {
+    setUser(u);
+    const next = pendingAction;
+    setPendingAction(null);
+    if (next === "chat") doStartChat();
+    else if (next === "story") doOpenLibrary();
+    else setView("landing");
+  };
+
+  const handleLogout = () => { clearAuth(); setUser(null); setStoryContext(null); setView("landing"); };
+
+  const handleOpenStory = (story) => {
+    setStoryContext(story);
+    setView("chat");
+    handleNewChat();
+  };
 
   const handleStartStory = async (storyData) => {
     try {
-      const res = await fetch("/api/stories", {
+      const res = await fetch(`${BASE_URL}/stories`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(storyData)
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to create story");
       setStoryContext({ ...storyData, id: data.story_id });
       setView("chat");
       handleNewChat();
     } catch (err) {
       console.error("Failed to create story", err);
-      setError("Failed to create story. Please try again.");
+      setError(err.message || "Failed to create story. Please try again.");
+      setView("library");
     }
   };
 
@@ -84,8 +122,10 @@ export default function App() {
   const handleStop = () => { if (stopRef.current) { stopRef.current(); stopRef.current = null; } if (streamingMsg) { appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }); setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]); } setStreamingMsg(null); setIsStreaming(false); setStatusText(""); };
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
 
-  if (view === "landing") return <LandingPage onSelectChat={handleStartChat} onSelectStory={() => setView("storySetup")} />;
-  if (view === "storySetup") return <StoryCreator onStart={handleStartStory} onBack={() => setView("landing")} />;
+  if (view === "landing") return <LandingPage onSelectChat={() => requireAuth("chat")} onSelectStory={() => requireAuth("story")} user={user} onSignIn={() => { setPendingAction(null); setView("auth"); }} onLogout={handleLogout} />;
+  if (view === "auth") return <AuthPage onAuthed={handleAuthed} onBack={() => setView("landing")} />;
+  if (view === "library") return <StoryLibrary user={user} onOpenStory={handleOpenStory} onNewStory={() => setView("storySetup")} onBack={() => setView("landing")} />;
+  if (view === "storySetup") return <StoryCreator onStart={handleStartStory} onBack={() => setView("library")} />;
 
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">
@@ -97,11 +137,11 @@ export default function App() {
           <button onClick={() => setSidebarOpen((o) => !o)} className="md:hidden p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center touch-manipulation">
             {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <button onClick={() => setView("landing")} className="p-2.5 rounded-xl hover:bg-gray-800 text-purple-400 hover:text-purple-300 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Back to Hub">
+          <button onClick={() => { setStoryContext(null); setView("landing"); }} className="p-2.5 rounded-xl hover:bg-gray-800 text-purple-400 hover:text-purple-300 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Back to Hub">
             <Home size={18} />
           </button>
           <div className="flex-1 min-w-0">
-            <h2 className="text-sm font-semibold text-white truncate">{activeTitle}</h2>
+            <h2 className="text-sm font-semibold text-white truncate">{storyContext ? storyContext.title : activeTitle}</h2>
             <p className="text-xs text-gray-500 hidden sm:block">{storyContext ? "Story Mode Active" : "Advanced reasoning model"}</p>
           </div>
           <button onClick={() => setSettingsOpen(true)} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Settings">

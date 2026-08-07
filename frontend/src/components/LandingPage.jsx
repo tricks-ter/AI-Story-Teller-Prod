@@ -1,11 +1,26 @@
 import React from 'react';
-import { BookOpen, MessageSquare, Sparkles } from 'lucide-react';
+import { BookOpen, MessageSquare, Sparkles, LogOut, LogIn } from 'lucide-react';
 
-export default function LandingPage({ onSelectChat, onSelectStory }) {
+export default function LandingPage({ onSelectChat, onSelectStory, user, onSignIn, onLogout }) {
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col items-center p-4 md:p-6 relative overflow-hidden">
       <div className="absolute top-1/4 left-1/4 w-72 h-72 md:w-96 md:h-96 bg-purple-600/20 rounded-full blur-3xl animate-pulse pointer-events-none"></div>
       <div className="absolute bottom-1/4 right-1/4 w-72 h-72 md:w-96 md:h-96 bg-blue-600/20 rounded-full blur-3xl animate-pulse delay-1000 pointer-events-none"></div>
+
+      <div className="relative z-20 w-full max-w-4xl flex justify-end items-center gap-2 min-h-[44px]">
+        {user ? (
+          <>
+            <span className="text-sm text-gray-400 truncate max-w-[40vw]">Hi, {user.username}</span>
+            <button onClick={onLogout} className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-red-400 px-3 py-2 rounded-lg hover:bg-gray-800 touch-manipulation min-h-[44px]">
+              <LogOut size={14} /> Sign out
+            </button>
+          </>
+        ) : (
+          <button onClick={onSignIn} className="flex items-center gap-1.5 text-sm text-gray-300 hover:text-white px-4 py-2.5 rounded-xl border border-gray-700 hover:border-gray-500 touch-manipulation min-h-[44px]">
+            <LogIn size={15} /> Sign In
+          </button>
+        )}
+      </div>
 
       <div className="relative z-10 max-w-4xl w-full text-center space-y-6 md:space-y-8 my-auto py-6">
         <div className="flex items-center justify-center gap-3 mb-4">
@@ -42,8 +57,8 @@ export default function LandingPage({ onSelectChat, onSelectStory }) {
             onClick={onSelectStory}
             className="group bg-gray-900/50 border border-gray-800 hover:border-purple-500/50 rounded-2xl p-6 md:p-8 text-left transition-all duration-300 active:scale-95 touch-manipulation relative"
           >
-            <div className="absolute top-3 right-3 md:top-4 md:right-4 bg-purple-500 text-white text-[10px] md:text-xs font-bold px-2 py-0.5 rounded-full">
-              NEW
+            <div className="absolute top-3 right-3 md:top-4 md:right-4 bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[10px] md:text-xs font-bold px-2 py-0.5 rounded-full">
+              Under Development
             </div>
             <div className="bg-purple-500/10 text-purple-400 p-2.5 md:p-3 rounded-xl w-fit mb-4">
               <BookOpen className="w-5 h-5 md:w-6 md:h-6" />
@@ -53,7 +68,7 @@ export default function LandingPage({ onSelectChat, onSelectStory }) {
               Interactive Narrative RPG. Create a world, define your character, and let the AI Dungeon Master guide your adventure.
             </p>
             <div className="mt-4 text-sm text-purple-400 font-medium">
-              Create a Saga →
+              Open Your Library →
             </div>
           </button>
         </div>
