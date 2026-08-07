@@ -1,14 +1,18 @@
-// frontend/src/App.jsx
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Menu, X, AlertCircle, Settings2 } from "lucide-react";
+import { Menu, X, AlertCircle, Settings2, Home } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import ChatWindow from "./components/ChatWindow";
 import ChatInput from "./components/ChatInput";
 import SettingsPanel from "./components/SettingsPanel";
+import LandingPage from "./components/LandingPage";
+import StoryCreator from "./components/StoryCreator";
 import { streamChat } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 
 export default function App() {
+  const [view, setView] = useState("landing"); // 'landing', 'storySetup', 'chat'
+  const [storyContext, setStoryContext] = useState(null);
+
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -31,9 +35,20 @@ export default function App() {
   const handleDeleteSession = (sessionId) => { deleteSession(sessionId); refreshSessions(); if (activeSessionId === sessionId) { setActiveSessionId(null); setMessages([]); setStreamingMsg(null); } };
   const handleSettingsChange = (next) => setSettings(next);
   
-  // FIX: Added missing arrow (=>)
   const handleToggleThinking = () =>
     setSettings((prev) => ({ ...prev, enableThinking: !prev.enableThinking }));
+
+  // Gateway Handlers
+  const handleStartChat = () => {
+    setView("chat");
+    handleNewChat();
+  };
+
+  const handleStartStory = (storyData) => {
+    setStoryContext(storyData);
+    setView("chat");
+    handleNewChat();
+  };
 
   const sendMessage = useCallback((text) => {
     const msg = typeof text === "string" ? text.trim() : "";
@@ -49,7 +64,6 @@ export default function App() {
     let assistantContent = ""; let assistantThinking = "";
     const snap = { ...settings };
 
-    // FIX: Added sessionId as first argument
     const cancel = streamChat(sessionId, history, snap, (event) => {
       if (event.type === "status") setStatusText(event.message ?? "");
       else if (event.type === "thinking") { assistantThinking += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() })); setStatusText(""); }
@@ -65,6 +79,17 @@ export default function App() {
   const handleStop = () => { if (stopRef.current) { stopRef.current(); stopRef.current = null; } if (streamingMsg) { appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }); setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]); } setStreamingMsg(null); setIsStreaming(false); setStatusText(""); };
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
 
+  // 1. Render Landing Page
+  if (view === "landing") {
+    return <LandingPage onSelectChat={handleStartChat} onSelectStory={() => setView("storySetup")} />;
+  }
+
+  // 2. Render Story Creator
+  if (view === "storySetup") {
+    return <StoryCreator onStart={handleStartStory} onBack={() => setView("landing")} />;
+  }
+
+  // 3. Render Chat Interface
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">
       {sidebarOpen && <div className="fixed inset-0 bg-black/60 z-20 md:hidden" onClick={() => setSidebarOpen(false)} />}
@@ -75,9 +100,16 @@ export default function App() {
           <button onClick={() => setSidebarOpen((o) => !o)} className="md:hidden p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center touch-manipulation">
             {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
+          <button 
+             onClick={() => setView("landing")} 
+             className="p-2.5 rounded-xl hover:bg-gray-800 text-purple-400 hover:text-purple-300 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" 
+             title="Back to Hub"
+          >
+            <Home size={18} />
+          </button>
           <div className="flex-1 min-w-0">
             <h2 className="text-sm font-semibold text-white truncate">{activeTitle}</h2>
-            <p className="text-xs text-gray-500 hidden sm:block">Advanced reasoning model</p>
+            <p className="text-xs text-gray-500 hidden sm:block">{storyContext ? "Story Mode Active" : "Advanced reasoning model"}</p>
           </div>
           <button onClick={() => setSettingsOpen(true)} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Settings">
             <Settings2 size={18} />
@@ -99,4 +131,4 @@ export default function App() {
       </div>
     </div>
   );
-                                  }
+}
