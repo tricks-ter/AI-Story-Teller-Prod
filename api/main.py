@@ -16,6 +16,9 @@ from pydantic import BaseModel, Field
 
 from database import db, LEGACY_USER_ID
 from core.auth import hash_password, verify_password, make_token, get_user_by_token
+from core.prompt_assembler import PromptAssembler
+from core.state_resolver import resolve_state
+from core.state_applier import apply_state_updates
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -27,7 +30,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.5.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="4.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -40,6 +43,14 @@ class MessageItem(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str = "default-session"
     messages: list[MessageItem]
+    model: str = DEFAULT_MODEL
+    max_tokens: int = Field(default=4096, ge=256, le=8192)
+    temperature: float = Field(default=0.7, ge=0.0, le=1.5)
+    enable_thinking: bool = True
+    client_telemetry: Optional[dict] = None
+
+class StoryContinueRequest(BaseModel):
+    user_action: str
     model: str = DEFAULT_MODEL
     max_tokens: int = Field(default=4096, ge=256, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=1.5)
@@ -167,6 +178,72 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
     db.add_story_message(story_id, "system", intro_msg, msg_type="intro", telemetry=telemetry)
 
     return {"story_id": story_id, "status": "created", "title": request.title}
+
+@router.post("/stories/{story_id}/continue")
+async def continue_story(story_id: str, request: StoryContinueRequest, raw: Request):
+    from zai import ZaiClient
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+
+    uid = user["id"]
+    telemetry = request.client_telemetry
+
+    # Save user action FIRST
+    db.add_story_message(story_id, "user", request.user_action, msg_type="action", telemetry=telemetry)
+
+    # Assemble the Sandwich Prompt
+    assembler = PromptAssembler(story_id)
+    system_prompt = assembler.assemble_full_prompt(request.user_action)
+
+    client = ZaiClient(api_key=API_KEY) if API_KEY else None
+    full_content = ""
+
+    async def generate() -> AsyncGenerator[str, None]:
+        nonlocal full_content
+        if not client:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'ZAI_API_KEY missing.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
+
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request.user_action}
+            ]
+            response = client.chat.completions.create(
+                model=request.model, messages=messages, stream=True,
+                max_tokens=request.max_tokens, temperature=request.temperature,
+                thinking={"type": "enabled" if request.enable_thinking else "disabled"}
+            )
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                content = getattr(delta, "content", None)
+                if reasoning:
+                    yield f"data: {json.dumps({'type': 'thinking', 'content': reasoning})}\n\n"
+                if content:
+                    full_content += content
+                    yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
+
+        # Resolve state and save clean narrative
+        clean_text, state_updates = resolve_state(full_content)
+        applied = apply_state_updates(story_id, state_updates)
+
+        meta = {"model": request.model, "temperature": request.temperature, "chars": len(clean_text)}
+        db.add_story_message(story_id, "assistant", clean_text, msg_type="narration",
+                             metadata=meta, telemetry=telemetry)
+
+        # Emit state_update event with clean content and applied updates
+        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': applied})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest, raw: Request):

@@ -8,7 +8,7 @@ import LandingPage from "./components/LandingPage";
 import StoryCreator from "./components/StoryCreator";
 import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
-import { streamChat } from "./utils/api";
+import { streamChat, streamStory } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
 
@@ -117,29 +117,122 @@ export default function App() {
     const msg = typeof text === "string" ? text.trim() : "";
     if (!msg || isStreaming) return;
     setInputValue(""); setError(null); setIsStreaming(true); setStreamingMsg(null); setStatusText("connecting…");
+
     let sessionId = activeSessionId;
     if (!sessionId) { const s = createSession(); sessionId = s.session_id; setActiveSessionId(sessionId); refreshSessions(); }
-    const userMessage = { id: `user-${Date.now()}`, role: "user", content: msg, timestamp: new Date().toISOString() };
-    appendMessage(sessionId, userMessage); setMessages((prev) => [...prev, userMessage]);
-    if (getMessages(sessionId).length === 1) { updateSessionTitle(sessionId, msg.length > 50 ? msg.slice(0, 50) + "…" : msg); refreshSessions(); }
-    const history = getMessages(sessionId).map((m) => ({ role: m.role, content: m.content }));
-    const assistantId = `assistant-${Date.now()}`;
-    let assistantContent = ""; let assistantThinking = "";
-    const snap = { ...settings };
 
-    const cancel = streamChat(sessionId, history, snap, (event) => {
-      if (event.type === "status") setStatusText(event.message ?? "");
-      else if (event.type === "thinking") { assistantThinking += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() })); setStatusText(""); }
-      else if (event.type === "content") { assistantContent += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() })); setStatusText(""); }
-      else if (event.type === "error") { setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); }
-      else if (event.type === "done") { appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }); setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]); setStreamingMsg(null); setIsStreaming(false); setStatusText(""); refreshSessions(); }
-    }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
+    const userMessage = { id: `user-${Date.now()}`, role: "user", content: msg, timestamp: new Date().toISOString() };
+    appendMessage(sessionId, userMessage);
+    setMessages((prev) => [...prev, userMessage]);
+
+    if (!storyContext && getMessages(sessionId).length === 1) {
+      updateSessionTitle(sessionId, msg.length > 50 ? msg.slice(0, 50) + "…" : msg);
+      refreshSessions();
+    }
+
+    const snap = { ...settings };
+    const assistantId = `assistant-${Date.now()}`;
+    let assistantContent = "";
+    let assistantThinking = "";
+
+    let cancel;
+
+    if (storyContext) {
+      // Story mode: use streamStory
+      cancel = streamStory(storyContext.id, msg, snap, (event) => {
+        if (event.type === "thinking") {
+          assistantThinking += event.content;
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() }));
+        } else if (event.type === "content") {
+          assistantContent += event.content;
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() }));
+        } else if (event.type === "state_update") {
+          // Replace bubble with clean content (tags stripped)
+          const cleanContent = event.clean_content || assistantContent;
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: cleanContent, timestamp: new Date().toISOString() }));
+          assistantContent = cleanContent;
+
+          // Update storyContext with new state
+          if (event.updates && event.updates.length > 0) {
+            setStoryContext((prev) => {
+              const updated = { ...prev };
+              event.updates.forEach(u => {
+                if (u.type === "TIME_UPDATE") {
+                  updated.current_day = u.day;
+                  updated.time_of_day = u.time_of_day;
+                }
+              });
+              return updated;
+            });
+          }
+        } else if (event.type === "error") {
+          setError(event.message || "Error");
+          setIsStreaming(false);
+          setStreamingMsg(null);
+          setStatusText("");
+        } else if (event.type === "done") {
+          appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() });
+          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]);
+          setStreamingMsg(null);
+          setIsStreaming(false);
+          setStatusText("");
+        }
+      }, (err) => {
+        setError(err.message || "Connection error");
+        setIsStreaming(false);
+        setStreamingMsg(null);
+        setStatusText("");
+      });
+    } else {
+      // Quick chat mode: use streamChat
+      const history = getMessages(sessionId).map((m) => ({ role: m.role, content: m.content }));
+      cancel = streamChat(sessionId, history, snap, (event) => {
+        if (event.type === "status") setStatusText(event.message ?? "");
+        else if (event.type === "thinking") {
+          assistantThinking += event.content;
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() }));
+          setStatusText("");
+        } else if (event.type === "content") {
+          assistantContent += event.content;
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() }));
+          setStatusText("");
+        } else if (event.type === "error") {
+          setError(event.message || "Error");
+          setIsStreaming(false);
+          setStreamingMsg(null);
+          setStatusText("");
+        } else if (event.type === "done") {
+          appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() });
+          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]);
+          setStreamingMsg(null);
+          setIsStreaming(false);
+          setStatusText("");
+          refreshSessions();
+        }
+      }, (err) => {
+        setError(err.message || "Connection error");
+        setIsStreaming(false);
+        setStreamingMsg(null);
+        setStatusText("");
+      });
+    }
+
     stopRef.current = cancel;
-  }, [isStreaming, activeSessionId, settings]);
+  }, [isStreaming, activeSessionId, settings, storyContext]);
 
   const handleSend = useCallback(() => sendMessage(inputValue), [inputValue, sendMessage]);
   const handleSuggestion = useCallback((text) => sendMessage(text), [sendMessage]);
-  const handleStop = () => { if (stopRef.current) { stopRef.current(); stopRef.current = null; } if (streamingMsg) { appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }); setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]); } setStreamingMsg(null); setIsStreaming(false); setStatusText(""); };
+  const handleStop = () => {
+    if (stopRef.current) { stopRef.current(); stopRef.current = null; }
+    if (streamingMsg) {
+      appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined });
+      setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]);
+    }
+    setStreamingMsg(null);
+    setIsStreaming(false);
+    setStatusText("");
+  };
+
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
 
   if (view === "landing") return <LandingPage onSelectChat={() => requireAuth("chat")} onSelectStory={() => requireAuth("story")} user={user} onSignIn={() => { setPendingAction(null); setView("auth"); }} onLogout={handleLogout} />;

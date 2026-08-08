@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 LEGACY_USER_ID = "legacy-system"
 
 def _merge_telemetry(existing, telemetry, telemetry_key="client_telemetry"):
-    """Safely merge telemetry into an existing metadata dict. Never overwrites non-telemetry keys."""
     base = (existing or {}) if isinstance(existing, dict) else {}
     out = dict(base)
     if telemetry is not None:
@@ -142,6 +141,13 @@ class Database:
             content TEXT NOT NULL,
             message_type VARCHAR(50) NOT NULL DEFAULT 'narration',
             metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS story_notes (
+            id SERIAL PRIMARY KEY,
+            story_id VARCHAR(36) NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            priority INT NOT NULL DEFAULT 5,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         """
         self.execute_query(ddl, fetch="none", commit=True)
@@ -351,6 +357,54 @@ class Database:
             "SELECT id, role, content, message_type, created_at "
             "FROM story_messages WHERE story_id = %s ORDER BY id ASC LIMIT %s",
             (story_id, int(limit)), fetch="all") or []
+
+    def get_story_notes(self, story_id, active_only=True):
+        query = "SELECT content, priority FROM story_notes WHERE story_id = %s"
+        if active_only:
+            query += " AND is_active = TRUE"
+        query += " ORDER BY priority DESC, id ASC LIMIT 10"
+        return self.execute_query(query, (story_id,), fetch="all") or []
+
+    def add_story_note(self, story_id, content, priority=5, is_active=True):
+        self.execute_query(
+            "INSERT INTO story_notes (story_id, content, priority, is_active, created_at) "
+            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)",
+            (story_id, content, int(priority), bool(is_active)),
+            fetch="none", commit=True)
+
+    # ── State updates (Phase 2) ──
+    def update_story_time(self, story_id, day, time_of_day):
+        self.execute_query(
+            "UPDATE stories SET current_day = %s, time_of_day = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (int(day), str(time_of_day), story_id),
+            fetch="none", commit=True)
+
+    def update_story_location(self, story_id, location):
+        def fn(cur):
+            cur.execute("SELECT metadata FROM stories WHERE id = %s", (story_id,))
+            row = cur.fetchone()
+            meta = (row["metadata"] if row and isinstance(row["metadata"], dict) else {}) or {}
+            meta["current_location"] = location
+            cur.execute("UPDATE stories SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(meta), story_id))
+        self._with_conn(fn, commit=True)
+
+    def update_character_stat(self, story_id, character_name, stat_name, new_value, max_value=100):
+        def fn(cur):
+            cur.execute(
+                "SELECT id, metadata FROM story_characters WHERE story_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
+                (story_id, character_name))
+            row = cur.fetchone()
+            if not row: return False
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            stats = meta.get("stats", {})
+            clamped = max(0, min(float(new_value), float(max_value)))
+            stats[stat_name] = clamped
+            meta["stats"] = stats
+            cur.execute("UPDATE story_characters SET metadata = %s WHERE id = %s",
+                        (json.dumps(meta), row["id"]))
+            return True
+        return self._with_conn(fn, commit=True) is True
 
 db = Database()
 

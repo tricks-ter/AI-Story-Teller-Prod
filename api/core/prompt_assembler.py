@@ -1,12 +1,8 @@
 import os
 import sys
 
-# ── Vercel import bootstrap ────────────────────────────────────────
-# This file lives in api/core/, but database.py lives in api/.
-# Add BOTH directories to sys.path so `from database import db`
-# works on Vercel serverless AND locally.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))       # .../api/core
-PARENT_DIR = os.path.dirname(BASE_DIR)                      # .../api
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(BASE_DIR)
 for _p in (PARENT_DIR, BASE_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -17,30 +13,60 @@ class PromptAssembler:
     def __init__(self, story_id: str):
         self.story_id = story_id
 
-    def get_story_context(self):
-        story = db.execute_query("SELECT * FROM stories WHERE id = %s", (self.story_id,), fetch="one")
-        chars = db.execute_query("SELECT * FROM story_characters WHERE story_id = %s", (self.story_id,), fetch="all")
-        msgs = db.execute_query("SELECT role, content FROM story_messages WHERE story_id = %s ORDER BY created_at DESC LIMIT 10", (self.story_id,), fetch="all")
-        return story, chars, msgs
+    def assemble_full_prompt(self, user_action: str) -> str:
+        story = db.get_story(self.story_id)
+        if not story:
+            return "You are a helpful assistant."
 
-    def assemble_prompt(self, user_action: str):
-        story, chars, msgs = self.get_story_context()
-        if not story: return "You are a helpful assistant."
+        characters = db.get_story_characters(self.story_id)
+        messages = db.get_story_messages(self.story_id, limit=15)
+        notes = db.get_story_notes(self.story_id, active_only=True)
 
-        prompt = f"System: You are a master storyteller in a {story['genre']} RPG. The story is '{story['title']}'.\n"
-        prompt += f"Premise: {story['premise']}\n"
-        prompt += f"Current Day: {story['current_day']}, Time: {story['time_of_day']}\n"
+        # 1. SYSTEM INSTRUCTIONS
+        system = f"""[SYSTEM INSTRUCTIONS]
+You are a master storyteller and interactive fiction engine for a {story['genre']} RPG.
+Write in 2nd-person present tense ("You draw your sword...").
+Be immersive, descriptive, and reactive to player choices.
+You may use hidden state tags to update the world state, but they must be on their own line:
+  [TIME_UPDATE: Day X, TimeOfDay]  (TimeOfDay must be Morning/Afternoon/Evening/Night)
+  [STAT_UPDATE: CharacterName.StatName = NewValue]  (for absolute values)
+  [STAT_UPDATE: CharacterName.StatName -10]  (for delta changes like damage)
+  [LOCATION_UPDATE: NewLocationName]
+Use these tags sparingly and only when the narrative justifies it.
+"""
 
-        if chars:
-            prompt += "Characters in scene:\n"
-            for c in chars:
-                stats = c.get('metadata', {}).get('stats', {}) if isinstance(c.get('metadata'), dict) else {}
-                prompt += f"- {c['name']} ({c['role']}): Background: {c['background']}. Stats: {stats}\n"
+        # 2. WORLD STATE
+        world = f"""[WORLD STATE]
+Story: {story['title']}
+Premise: {story['premise']}
+Current Day: {story['current_day']}
+Time of Day: {story['time_of_day']}
+"""
+        meta = story.get("metadata") or {}
+        if meta.get("current_location"):
+            world += f"Current Location: {meta['current_location']}\n"
 
-        prompt += "\nRecent History:\n"
-        for m in reversed(msgs):
-            prompt += f"{m['role']}: {m['content']}\n"
+        world += "\nActive Characters:\n"
+        for c in characters:
+            cmeta = c.get("metadata") or {}
+            stats = cmeta.get("stats", {})
+            inv = cmeta.get("inventory", [])
+            world += f"- {c['name']} ({c['role']}): Background: {c['background']}. Stats: {stats}. Inventory: {inv}\n"
 
-        prompt += f"\nPlayer Action: {user_action}\n"
-        prompt += "Respond with immersive 2nd-person prose. Use hidden tags like [TIME_UPDATE: Day X, TimeOfDay] if time passes."
-        return prompt
+        # 3. RECENT STORY CONTEXT
+        context = "\n[RECENT STORY CONTEXT]\n"
+        for m in messages:
+            role = "Player" if m["role"] == "user" else "Narrator"
+            context += f"{role}: {m['content']}\n"
+
+        # 4. DIRECTOR'S NOTES
+        director = ""
+        if notes:
+            director = "\n[DIRECTOR'S NOTES - High Priority Overrides]\n"
+            for n in notes:
+                director += f"- {n['content']}\n"
+
+        # 5. PLAYER'S CURRENT ACTION
+        action = f"\n[PLAYER'S CURRENT ACTION]\n{user_action}\n\nRespond with immersive narrative prose."
+
+        return system + world + context + director + action
