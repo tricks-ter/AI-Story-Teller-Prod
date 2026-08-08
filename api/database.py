@@ -12,6 +12,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 LEGACY_USER_ID = "legacy-system"
+SCHEMA_VERSION = "3"
 
 def _merge_telemetry(existing, telemetry, telemetry_key="client_telemetry"):
     base = (existing or {}) if isinstance(existing, dict) else {}
@@ -78,6 +79,16 @@ class Database:
             return None
         return self._with_conn(fn, commit=commit)
 
+    def _get_schema_version(self):
+        row = self.execute_query("SELECT value FROM schema_meta WHERE key = 'schema_version'", fetch="one")
+        return row["value"] if row else None
+
+    def _set_schema_version(self, version):
+        self.execute_query(
+            "INSERT INTO schema_meta (key, value, updated_at) VALUES ('schema_version', %s, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP",
+            (version,), fetch="none", commit=True)
+
     def init_tables(self):
         if not self.database_url: return
 
@@ -87,6 +98,10 @@ class Database:
             "ON CONFLICT (id) DO NOTHING", fetch="none", commit=True)
 
         ddl = """
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key VARCHAR(50) PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS users (
             id VARCHAR(36) PRIMARY KEY,
             username VARCHAR(80) UNIQUE NOT NULL,
@@ -173,7 +188,10 @@ class Database:
         """
         self.execute_query(ddl, fetch="none", commit=True)
 
-        # Only run the expensive backfill if there is actually work to do.
+        # Only run heavy migrations/backfill if the schema version is outdated.
+        if self._get_schema_version() == SCHEMA_VERSION:
+            return
+
         needs_backfill = self.execute_query(
             "SELECT 1 FROM stories s WHERE NOT EXISTS (SELECT 1 FROM playthroughs p WHERE p.story_id = s.id) LIMIT 1",
             fetch="one")
@@ -257,6 +275,8 @@ class Database:
         ]
         for m in migrations:
             self.execute_query(m, fetch="none", commit=True)
+
+        self._set_schema_version(SCHEMA_VERSION)
 
     # ── Auth / Users ──
     def create_user_with_token(self, user_id, username, password_hash, token, expires_at, metadata=None, telemetry=None):

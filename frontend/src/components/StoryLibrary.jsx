@@ -23,26 +23,43 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
     setError(null);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const [a, m, h] = await Promise.all([
-        fetch(`${BASE_URL}/stories?scope=all`, { headers: authHeaders(), signal: controller.signal }),
-        fetch(`${BASE_URL}/stories?scope=mine`, { headers: authHeaders(), signal: controller.signal }),
-        fetch(`${BASE_URL}/playthroughs`, { headers: authHeaders(), signal: controller.signal }),
-      ]);
-      const [ad, md, hd] = await Promise.all([parseJsonSafe(a), parseJsonSafe(m), parseJsonSafe(h)]);
-      if (!a.ok) throw new Error(friendlyHttp(a.status, ad?.detail));
-      if (!m.ok) throw new Error(friendlyHttp(m.status, md?.detail));
-      if (!h.ok) throw new Error(friendlyHttp(h.status, hd?.detail));
-      setAllStories(Array.isArray(ad) ? ad : []);
-      setMyStories(Array.isArray(md) ? md : []);
-      setHistory(Array.isArray(hd) ? hd : []);
-    } catch (err) {
-      console.error('[library] error:', err);
-      setError(describeNetworkError(err));
-      setAllStories([]); setMyStories([]); setHistory([]);
-    } finally {
-      clearTimeout(timer);
+
+    const jobs = [
+      fetch(`${BASE_URL}/stories?scope=all`, { headers: authHeaders(), signal: controller.signal }),
+      fetch(`${BASE_URL}/stories?scope=mine`, { headers: authHeaders(), signal: controller.signal }),
+      fetch(`${BASE_URL}/playthroughs`, { headers: authHeaders(), signal: controller.signal }),
+    ];
+
+    const results = await Promise.allSettled(jobs);
+    clearTimeout(timer);
+
+    const errs = [];
+    const setters = [setAllStories, setMyStories, setHistory];
+    const names = ['All Sagas', 'My Creations', 'History'];
+
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled') {
+        try {
+          const res = r.value;
+          const data = await parseJsonSafe(res);
+          if (res.ok) {
+            setters[i](Array.isArray(data) ? data : []);
+          } else {
+            setters[i]([]);
+            errs.push(`${names[i]}: ${friendlyHttp(res.status, data?.detail)}`);
+          }
+        } catch (e) {
+          setters[i]([]);
+          errs.push(`${names[i]}: parse error`);
+        }
+      } else {
+        setters[i]([]);
+        errs.push(`${names[i]}: ${describeNetworkError(r.reason)}`);
+      }
     }
+
+    if (errs.length) setError(errs.join('  •  '));
   }, []);
 
   useEffect(() => { load(); }, [load]);
