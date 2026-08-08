@@ -34,6 +34,9 @@ export default function App() {
   useEffect(() => { setSessions(listSessions()); }, []);
   useEffect(() => { saveSettings(settings); }, [settings]);
 
+  // Pre-warm the serverless backend so auth/library/continue are fast
+  useEffect(() => { fetch(`${BASE_URL}/health`).catch(() => {}); }, []);
+
   useEffect(() => {
     if (getToken()) {
       fetchMe().then(u => { if (u) setUser(u); else { clearAuth(); setUser(null); } });

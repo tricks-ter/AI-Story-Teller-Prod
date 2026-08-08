@@ -173,24 +173,28 @@ class Database:
         """
         self.execute_query(ddl, fetch="none", commit=True)
 
-        # Idempotent backfill: give every legacy story a playthrough for its creator
-        self.execute_query("""
-        DO $$
-        DECLARE s RECORD; p VARCHAR(36);
-        BEGIN
-          FOR s IN SELECT id, creator_id, current_day, time_of_day FROM stories LOOP
-            IF NOT EXISTS (SELECT 1 FROM playthroughs p2 WHERE p2.story_id = s.id) THEN
-              p := substr(md5(random()::text || s.id), 1, 36);
-              INSERT INTO playthroughs (id, story_id, user_id, current_day, time_of_day, status, metadata, created_at, updated_at)
-              VALUES (p, s.id, s.creator_id, s.current_day, s.time_of_day, 'active', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-              UPDATE story_messages SET playthrough_id = p WHERE story_id = s.id AND playthrough_id = 'legacy';
-              INSERT INTO playthrough_characters (id, playthrough_id, character_name, role, background, is_player, metadata, created_at)
-              SELECT substr(md5(random()::text || sc.id), 1, 36), p, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP
-              FROM story_characters sc WHERE sc.story_id = s.id;
-            END IF;
-          END LOOP;
-        END $$;
-        """, fetch="none", commit=True)
+        # Only run the expensive backfill if there is actually work to do.
+        needs_backfill = self.execute_query(
+            "SELECT 1 FROM stories s WHERE NOT EXISTS (SELECT 1 FROM playthroughs p WHERE p.story_id = s.id) LIMIT 1",
+            fetch="one")
+        if needs_backfill:
+            self.execute_query("""
+            DO $$
+            DECLARE s RECORD; p VARCHAR(36);
+            BEGIN
+              FOR s IN SELECT id, creator_id, current_day, time_of_day FROM stories LOOP
+                IF NOT EXISTS (SELECT 1 FROM playthroughs p2 WHERE p2.story_id = s.id) THEN
+                  p := substr(md5(random()::text || s.id), 1, 36);
+                  INSERT INTO playthroughs (id, story_id, user_id, current_day, time_of_day, status, metadata, created_at, updated_at)
+                  VALUES (p, s.id, s.creator_id, s.current_day, s.time_of_day, 'active', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                  UPDATE story_messages SET playthrough_id = p WHERE story_id = s.id AND playthrough_id = 'legacy';
+                  INSERT INTO playthrough_characters (id, playthrough_id, character_name, role, background, is_player, metadata, created_at)
+                  SELECT substr(md5(random()::text || sc.id), 1, 36), p, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP
+                  FROM story_characters sc WHERE sc.story_id = s.id;
+                END IF;
+              END LOOP;
+            END $$;
+            """, fetch="none", commit=True)
 
         migrations = [
             """UPDATE users SET metadata = '{}'::jsonb WHERE metadata IS NULL;
@@ -423,7 +427,7 @@ class Database:
             (story_id, content, int(priority), bool(is_active)),
             fetch="none", commit=True)
 
-    # ── Playthroughs (per-user sessions) ──
+    # ── Playthroughs ──
     def get_active_playthrough(self, story_id, user_id):
         return self.execute_query(
             "SELECT * FROM playthroughs WHERE story_id = %s AND user_id = %s AND status = 'active' "
@@ -443,9 +447,9 @@ class Database:
                 (pid, story_id, user_id))
             cur.execute(
                 "INSERT INTO playthrough_characters (id, playthrough_id, character_name, role, background, is_player, metadata, created_at) "
-                "SELECT %s, %s, name, role, background, is_player, metadata, CURRENT_TIMESTAMP "
-                "FROM story_characters WHERE story_id = %s",
-                (str(uuid.uuid4()), pid, story_id))
+                "SELECT substr(md5(random()::text || sc.id), 1, 36), %s, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP "
+                "FROM story_characters sc WHERE sc.story_id = %s",
+                (pid, story_id))
             cur.execute("SELECT * FROM playthroughs WHERE id = %s", (pid,))
             return cur.fetchone()
         return self._with_conn(fn, commit=True)
