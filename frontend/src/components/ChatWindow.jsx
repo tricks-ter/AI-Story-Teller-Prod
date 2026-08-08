@@ -21,9 +21,9 @@ export default function ChatWindow({
 
   const renderBubble = (msg, streaming) =>
     msg.narrative ? (
-      <NarrativeBubble message={msg} isStreaming={streaming} />
+      <NarrativeBubble key={msg.id} message={msg} isStreaming={streaming} />
     ) : (
-      <MessageBubble message={msg} isStreaming={streaming} />
+      <MessageBubble key={msg.id} message={msg} isStreaming={streaming} />
     );
 
   return (
@@ -32,9 +32,7 @@ export default function ChatWindow({
         <EmptyState onSuggestion={onSuggestion} />
       ) : (
         <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-6 sm:space-y-8">
-          {messages.map((msg) => (
-            <React.Fragment key={msg.id}>{renderBubble(msg, false)}</React.Fragment>
-          ))}
+          {messages.map((msg) => renderBubble(msg, false))}
 
           {streamingMsg && renderBubble(streamingMsg, isStreaming)}
 
