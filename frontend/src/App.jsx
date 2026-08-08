@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Menu, X, AlertCircle, Settings2, Home } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import ChatWindow from "./components/ChatWindow";
@@ -83,7 +83,8 @@ export default function App() {
         id: `db-${m.id}`,
         role: m.role === "system" ? "assistant" : m.role,
         content: m.content,
-        timestamp: m.created_at
+        timestamp: m.created_at,
+        narrative: true
       }));
       setMessages(seeded);
       seeded.forEach(m => appendMessage(session.session_id, m));
@@ -121,11 +122,12 @@ export default function App() {
     let sessionId = activeSessionId;
     if (!sessionId) { const s = createSession(); sessionId = s.session_id; setActiveSessionId(sessionId); refreshSessions(); }
 
-    const userMessage = { id: `user-${Date.now()}`, role: "user", content: msg, timestamp: new Date().toISOString() };
+    const isStory = !!storyContext;
+    const userMessage = { id: `user-${Date.now()}`, role: "user", content: msg, timestamp: new Date().toISOString(), narrative: isStory };
     appendMessage(sessionId, userMessage);
     setMessages((prev) => [...prev, userMessage]);
 
-    if (!storyContext && getMessages(sessionId).length === 1) {
+    if (!isStory && getMessages(sessionId).length === 1) {
       updateSessionTitle(sessionId, msg.length > 50 ? msg.slice(0, 50) + "…" : msg);
       refreshSessions();
     }
@@ -137,84 +139,45 @@ export default function App() {
 
     let cancel;
 
-    if (storyContext) {
-      // Story mode: use streamStory
+    if (isStory) {
       cancel = streamStory(storyContext.id, msg, snap, (event) => {
         if (event.type === "thinking") {
           assistantThinking += event.content;
-          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() }));
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, narrative: true, timestamp: new Date().toISOString() }));
         } else if (event.type === "content") {
           assistantContent += event.content;
-          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() }));
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, narrative: true, timestamp: new Date().toISOString() }));
         } else if (event.type === "state_update") {
-          // Replace bubble with clean content (tags stripped)
           const cleanContent = event.clean_content || assistantContent;
-          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: cleanContent, timestamp: new Date().toISOString() }));
           assistantContent = cleanContent;
-
-          // Update storyContext with new state
+          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: cleanContent, narrative: true, timestamp: new Date().toISOString() }));
           if (event.updates && event.updates.length > 0) {
             setStoryContext((prev) => {
               const updated = { ...prev };
               event.updates.forEach(u => {
-                if (u.type === "TIME_UPDATE") {
-                  updated.current_day = u.day;
-                  updated.time_of_day = u.time_of_day;
-                }
+                if (u.type === "TIME_UPDATE") { updated.current_day = u.day; updated.time_of_day = u.time_of_day; }
               });
               return updated;
             });
           }
         } else if (event.type === "error") {
-          setError(event.message || "Error");
-          setIsStreaming(false);
-          setStreamingMsg(null);
-          setStatusText("");
+          setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText("");
         } else if (event.type === "done") {
-          appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() });
-          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]);
-          setStreamingMsg(null);
-          setIsStreaming(false);
-          setStatusText("");
+          const finalMsg = { id: assistantId, role: "assistant", content: assistantContent, narrative: true, timestamp: new Date().toISOString() };
+          appendMessage(sessionId, finalMsg);
+          setMessages((prev) => [...prev, finalMsg]);
+          setStreamingMsg(null); setIsStreaming(false); setStatusText("");
         }
-      }, (err) => {
-        setError(err.message || "Connection error");
-        setIsStreaming(false);
-        setStreamingMsg(null);
-        setStatusText("");
-      });
+      }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
     } else {
-      // Quick chat mode: use streamChat
       const history = getMessages(sessionId).map((m) => ({ role: m.role, content: m.content }));
       cancel = streamChat(sessionId, history, snap, (event) => {
         if (event.type === "status") setStatusText(event.message ?? "");
-        else if (event.type === "thinking") {
-          assistantThinking += event.content;
-          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() }));
-          setStatusText("");
-        } else if (event.type === "content") {
-          assistantContent += event.content;
-          setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() }));
-          setStatusText("");
-        } else if (event.type === "error") {
-          setError(event.message || "Error");
-          setIsStreaming(false);
-          setStreamingMsg(null);
-          setStatusText("");
-        } else if (event.type === "done") {
-          appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() });
-          setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]);
-          setStreamingMsg(null);
-          setIsStreaming(false);
-          setStatusText("");
-          refreshSessions();
-        }
-      }, (err) => {
-        setError(err.message || "Connection error");
-        setIsStreaming(false);
-        setStreamingMsg(null);
-        setStatusText("");
-      });
+        else if (event.type === "thinking") { assistantThinking += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() })); setStatusText(""); }
+        else if (event.type === "content") { assistantContent += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() })); setStatusText(""); }
+        else if (event.type === "error") { setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); }
+        else if (event.type === "done") { appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }); setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]); setStreamingMsg(null); setIsStreaming(false); setStatusText(""); refreshSessions(); }
+      }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
     }
 
     stopRef.current = cancel;
@@ -228,9 +191,7 @@ export default function App() {
       appendMessage(activeSessionId, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined });
       setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]);
     }
-    setStreamingMsg(null);
-    setIsStreaming(false);
-    setStatusText("");
+    setStreamingMsg(null); setIsStreaming(false); setStatusText("");
   };
 
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";

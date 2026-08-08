@@ -22,20 +22,26 @@ class PromptAssembler:
         messages = db.get_story_messages(self.story_id, limit=15)
         notes = db.get_story_notes(self.story_id, active_only=True)
 
-        # 1. SYSTEM INSTRUCTIONS
         system = f"""[SYSTEM INSTRUCTIONS]
 You are a master storyteller and interactive fiction engine for a {story['genre']} RPG.
 Write in 2nd-person present tense ("You draw your sword...").
-Be immersive, descriptive, and reactive to player choices.
-You may use hidden state tags to update the world state, but they must be on their own line:
-  [TIME_UPDATE: Day X, TimeOfDay]  (TimeOfDay must be Morning/Afternoon/Evening/Night)
-  [STAT_UPDATE: CharacterName.StatName = NewValue]  (for absolute values)
-  [STAT_UPDATE: CharacterName.StatName -10]  (for delta changes like damage)
+You may use hidden state tags on their own line to update world state:
+  [TIME_UPDATE: Day X, TimeOfDay]  (Morning/Afternoon/Evening/Night)
+  [STAT_UPDATE: CharacterName.StatName = NewValue]
+  [STAT_UPDATE: CharacterName.StatName -10]
   [LOCATION_UPDATE: NewLocationName]
-Use these tags sparingly and only when the narrative justifies it.
+Use tags sparingly, only when the narrative justifies it.
+
+[STYLE RULES - CRITICAL]
+- Write in CLEAR, SIMPLE, EASY-TO-IMAGINE language. Prefer short, concrete sentences.
+- Describe what can be SEEN, HEARD, and FELT. Avoid confusing metaphors and overly ornate prose.
+- Put ALL spoken dialogue inside double quotes, like: "Who goes there?" the guard shouted.
+- Write narration (description, action, background) as normal sentences WITHOUT quotes.
+- Ground every scene in the player character's established background and abilities.
+- Introduce at most 1-2 new elements per turn so the player is never lost.
+- Keep responses to 2-4 short paragraphs and end with a clear moment or choice.
 """
 
-        # 2. WORLD STATE
         world = f"""[WORLD STATE]
 Story: {story['title']}
 Premise: {story['premise']}
@@ -53,20 +59,17 @@ Time of Day: {story['time_of_day']}
             inv = cmeta.get("inventory", [])
             world += f"- {c['name']} ({c['role']}): Background: {c['background']}. Stats: {stats}. Inventory: {inv}\n"
 
-        # 3. RECENT STORY CONTEXT
         context = "\n[RECENT STORY CONTEXT]\n"
         for m in messages:
             role = "Player" if m["role"] == "user" else "Narrator"
             context += f"{role}: {m['content']}\n"
 
-        # 4. DIRECTOR'S NOTES
         director = ""
         if notes:
             director = "\n[DIRECTOR'S NOTES - High Priority Overrides]\n"
             for n in notes:
                 director += f"- {n['content']}\n"
 
-        # 5. PLAYER'S CURRENT ACTION
-        action = f"\n[PLAYER'S CURRENT ACTION]\n{user_action}\n\nRespond with immersive narrative prose."
+        action = f"\n[PLAYER'S CURRENT ACTION]\n{user_action}\n\nRespond with clear, immersive narrative prose."
 
         return system + world + context + director + action
