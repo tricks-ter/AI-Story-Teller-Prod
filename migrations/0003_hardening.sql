@@ -1,0 +1,62 @@
+UPDATE users SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+UPDATE users SET role = 'user' WHERE role IS NULL;
+ALTER TABLE users ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+ALTER TABLE users ALTER COLUMN metadata SET NOT NULL;
+ALTER TABLE users ALTER COLUMN role SET DEFAULT 'user';
+ALTER TABLE users ALTER COLUMN role SET NOT NULL;
+
+UPDATE chat_sessions SET user_id = 'legacy-system' WHERE user_id IS NULL;
+ALTER TABLE chat_sessions ALTER COLUMN user_id SET DEFAULT 'legacy-system';
+ALTER TABLE chat_sessions ALTER COLUMN user_id SET NOT NULL;
+
+UPDATE chat_messages SET user_id = 'legacy-system' WHERE user_id IS NULL;
+UPDATE chat_messages SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+ALTER TABLE chat_messages ALTER COLUMN user_id SET DEFAULT 'legacy-system';
+ALTER TABLE chat_messages ALTER COLUMN user_id SET NOT NULL;
+ALTER TABLE chat_messages ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+ALTER TABLE chat_messages ALTER COLUMN metadata SET NOT NULL;
+
+UPDATE stories SET creator_id = 'legacy-system' WHERE creator_id IS NULL;
+UPDATE stories SET genre = 'Unknown' WHERE genre IS NULL;
+UPDATE stories SET premise = '' WHERE premise IS NULL;
+UPDATE stories SET current_day = 1 WHERE current_day IS NULL;
+UPDATE stories SET time_of_day = 'Morning' WHERE time_of_day IS NULL;
+UPDATE stories SET is_premium = FALSE WHERE is_premium IS NULL;
+UPDATE stories SET energy_cost = 0 WHERE energy_cost IS NULL;
+UPDATE stories SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+ALTER TABLE stories ALTER COLUMN creator_id SET DEFAULT 'legacy-system';
+ALTER TABLE stories ALTER COLUMN creator_id SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN genre SET DEFAULT 'Unknown';
+ALTER TABLE stories ALTER COLUMN genre SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN premise SET DEFAULT '';
+ALTER TABLE stories ALTER COLUMN premise SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN current_day SET DEFAULT 1;
+ALTER TABLE stories ALTER COLUMN current_day SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN time_of_day SET DEFAULT 'Morning';
+ALTER TABLE stories ALTER COLUMN time_of_day SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN is_premium SET DEFAULT FALSE;
+ALTER TABLE stories ALTER COLUMN is_premium SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN energy_cost SET DEFAULT 0;
+ALTER TABLE stories ALTER COLUMN energy_cost SET NOT NULL;
+ALTER TABLE stories ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+ALTER TABLE stories ALTER COLUMN metadata SET NOT NULL;
+
+UPDATE story_characters SET role = 'Character' WHERE role IS NULL;
+UPDATE story_characters SET background = '' WHERE background IS NULL;
+UPDATE story_characters SET is_player = TRUE WHERE is_player IS NULL;
+UPDATE story_characters SET metadata = '{}'::jsonb WHERE metadata IS NULL;
+ALTER TABLE story_characters ALTER COLUMN role SET DEFAULT 'Character';
+ALTER TABLE story_characters ALTER COLUMN role SET NOT NULL;
+ALTER TABLE story_characters ALTER COLUMN background SET DEFAULT '';
+ALTER TABLE story_characters ALTER COLUMN background SET NOT NULL;
+ALTER TABLE story_characters ALTER COLUMN is_player SET DEFAULT TRUE;
+ALTER TABLE story_characters ALTER COLUMN is_player SET NOT NULL;
+ALTER TABLE story_characters ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+ALTER TABLE story_characters ALTER COLUMN metadata SET NOT NULL;
+
+UPDATE story_messages SET message_type = 'narration' WHERE message_type IS NULL;
+UPDATE story_messages SET metadata = '{}'::jsonb WHERE story_messages.metadata IS NULL;
+ALTER TABLE story_messages ALTER COLUMN message_type SET DEFAULT 'narration';
+ALTER TABLE story_messages ALTER COLUMN message_type SET NOT NULL;
+ALTER TABLE story_messages ALTER COLUMN metadata SET DEFAULT '{}'::jsonb;
+ALTER TABLE story_messages ALTER COLUMN metadata SET NOT NULL;
