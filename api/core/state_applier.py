@@ -12,17 +12,13 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-def apply_state_updates(story_id: str, updates: list) -> list:
-    """
-    Applies parsed state updates to the database.
-    Returns a list of successfully applied updates.
-    """
+def apply_state_updates(playthrough_id: str, updates: list) -> list:
     applied = []
     for update in updates:
         try:
             utype = update.get("type")
             if utype == "TIME_UPDATE":
-                db.update_story_time(story_id, update["day"], update["time_of_day"])
+                db.update_playthrough_time(playthrough_id, update["day"], update["time_of_day"])
                 applied.append(update)
 
             elif utype == "STAT_UPDATE":
@@ -32,11 +28,10 @@ def apply_state_updates(story_id: str, updates: list) -> list:
                 is_delta = update.get("is_delta", False)
 
                 if is_delta:
-                    # Fetch current stat value and apply delta
-                    chars = db.get_story_characters(story_id)
+                    chars = db.get_playthrough_characters(playthrough_id)
                     current = None
                     for c in chars:
-                        if c["name"].lower() == char_name.lower():
+                        if c["character_name"].lower() == char_name.lower():
                             meta = c.get("metadata") or {}
                             stats = meta.get("stats", {})
                             current = stats.get(stat_name, 100)
@@ -44,12 +39,11 @@ def apply_state_updates(story_id: str, updates: list) -> list:
                     if current is not None:
                         new_value = float(current) + float(new_value)
 
-                success = db.update_character_stat(story_id, char_name, stat_name, new_value, max_value=999)
-                if success:
+                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=999):
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
-                db.update_story_location(story_id, update["location"])
+                db.update_playthrough_location(playthrough_id, update["location"])
                 applied.append(update)
 
         except Exception as e:

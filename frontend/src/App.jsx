@@ -76,10 +76,26 @@ export default function App() {
     setStreamingMsg(null); setStatusText(""); setError(null); setSidebarOpen(false);
     setMessages([]);
     try {
-      const res = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=100`, { headers: authHeaders() });
-      const data = await parseJsonSafe(res);
-      if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
-      const seeded = (Array.isArray(data) ? data : []).map(m => ({
+      const playRes = await fetch(`${BASE_URL}/stories/${story.id}/play`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(await withTelemetry({}))
+      });
+      const playData = await parseJsonSafe(playRes);
+      if (!playRes.ok) throw new Error(friendlyHttp(playRes.status, playData?.detail));
+      const pt = playData.playthrough;
+
+      setStoryContext({
+        ...story,
+        playthrough_id: pt.id,
+        current_day: pt.current_day,
+        time_of_day: pt.time_of_day,
+      });
+
+      const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
+      const msgData = await parseJsonSafe(msgRes);
+      if (!msgRes.ok) throw new Error(friendlyHttp(msgRes.status, msgData?.detail));
+      const seeded = (Array.isArray(msgData) ? msgData : []).map(m => ({
         id: `db-${m.id}`,
         role: m.role === "system" ? "assistant" : m.role,
         content: m.content,
@@ -105,8 +121,7 @@ export default function App() {
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
       setStoryContext({ ...storyData, id: data.story_id });
-      setView("chat");
-      handleNewChat();
+      setView("library");
     } catch (err) {
       console.error("Failed to create story", err);
       setError(describeNetworkError(err));
@@ -151,15 +166,11 @@ export default function App() {
           const cleanContent = event.clean_content || assistantContent;
           assistantContent = cleanContent;
           setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: cleanContent, narrative: true, timestamp: new Date().toISOString() }));
-          if (event.updates && event.updates.length > 0) {
-            setStoryContext((prev) => {
-              const updated = { ...prev };
-              event.updates.forEach(u => {
-                if (u.type === "TIME_UPDATE") { updated.current_day = u.day; updated.time_of_day = u.time_of_day; }
-              });
-              return updated;
-            });
-          }
+          setStoryContext((prev) => ({
+            ...prev,
+            current_day: event.day ?? prev.current_day,
+            time_of_day: event.time_of_day ?? prev.time_of_day,
+          }));
         } else if (event.type === "error") {
           setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText("");
         } else if (event.type === "done") {

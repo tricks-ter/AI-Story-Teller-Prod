@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="5.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -91,6 +91,12 @@ def check_story_access(story: dict, user: dict):
     if owner and owner != user["id"] and owner != LEGACY_USER_ID:
         raise HTTPException(status_code=403, detail="This saga belongs to another author")
 
+def ensure_playthrough(story_id: str, user: dict):
+    pt = db.get_active_playthrough(story_id, user["id"])
+    if not pt:
+        pt = db.create_playthrough(story_id, user["id"])
+    return pt
+
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
@@ -133,16 +139,31 @@ def me(raw: Request):
     return {"id": user["id"], "username": user["username"], "role": user["role"], "metadata": user.get("metadata") or {}}
 
 @router.get("/stories")
-def list_stories(raw: Request):
+def list_stories(raw: Request, scope: str = "all"):
     user = require_user(raw)
-    return db.list_stories_for_user(user["id"])
+    if scope == "mine":
+        return db.list_stories_for_user(user["id"])
+    return db.list_all_stories(user["id"])
+
+@router.get("/playthroughs")
+def list_playthroughs(raw: Request):
+    user = require_user(raw)
+    return db.list_playthroughs_for_user(user["id"])
+
+@router.get("/playthroughs/{playthrough_id}/messages")
+def get_playthrough_messages(playthrough_id: str, raw: Request, limit: int = 100):
+    user = require_user(raw)
+    pt = db.get_playthrough(playthrough_id)
+    if not pt: raise HTTPException(status_code=404, detail="Playthrough not found")
+    if pt["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Not your playthrough")
+    return db.get_playthrough_messages(playthrough_id, limit=min(max(int(limit), 1), 200))
 
 @router.get("/stories/{story_id}")
 def get_story_detail(story_id: str, raw: Request):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
     return {"story": story, "characters": db.get_story_characters(story_id)}
 
 @router.get("/stories/{story_id}/messages")
@@ -150,8 +171,19 @@ def get_story_messages(story_id: str, raw: Request, limit: int = 50):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
     return db.get_story_messages(story_id, limit=min(max(int(limit), 1), 200))
+
+@router.post("/stories/{story_id}/play")
+def play_story(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    pt = ensure_playthrough(story_id, user)
+    return {
+        "playthrough": pt,
+        "story": story,
+        "characters": db.get_playthrough_characters(pt["id"]),
+    }
 
 @router.post("/stories")
 def create_new_story(request: StoryCreateRequest, raw: Request):
@@ -185,16 +217,14 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
 
-    uid = user["id"]
+    pt = ensure_playthrough(story_id, user)
+    pid = pt["id"]
     telemetry = request.client_telemetry
 
-    # Save user action FIRST
-    db.add_story_message(story_id, "user", request.user_action, msg_type="action", telemetry=telemetry)
+    db.add_playthrough_message(story_id, pid, "user", request.user_action, msg_type="action", telemetry=telemetry)
 
-    # Assemble the Sandwich Prompt
-    assembler = PromptAssembler(story_id)
+    assembler = PromptAssembler(pid)
     system_prompt = assembler.assemble_full_prompt(request.user_action)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None
@@ -231,16 +261,15 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 
-        # Resolve state and save clean narrative
         clean_text, state_updates = resolve_state(full_content)
-        applied = apply_state_updates(story_id, state_updates)
+        applied = apply_state_updates(pid, state_updates)
 
         meta = {"model": request.model, "temperature": request.temperature, "chars": len(clean_text)}
-        db.add_story_message(story_id, "assistant", clean_text, msg_type="narration",
-                             metadata=meta, telemetry=telemetry)
+        db.add_playthrough_message(story_id, pid, "assistant", clean_text, msg_type="narration",
+                                   metadata=meta, telemetry=telemetry)
 
-        # Emit state_update event with clean content and applied updates
-        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': applied})}\n\n"
+        fresh = db.get_playthrough(pid)
+        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': applied, 'day': fresh['current_day'], 'time_of_day': fresh['time_of_day']})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

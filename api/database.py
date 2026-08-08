@@ -1,6 +1,7 @@
 import os
 import threading
 import json
+import uuid
 import logging
 from datetime import datetime, timezone
 import psycopg2
@@ -149,8 +150,47 @@ class Database:
             priority INT NOT NULL DEFAULT 5,
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS playthroughs (
+            id VARCHAR(36) PRIMARY KEY,
+            story_id VARCHAR(36) NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+            user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            current_day INT NOT NULL DEFAULT 1,
+            time_of_day VARCHAR(50) NOT NULL DEFAULT 'Morning',
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS playthrough_characters (
+            id VARCHAR(36) PRIMARY KEY,
+            playthrough_id VARCHAR(36) NOT NULL REFERENCES playthroughs(id) ON DELETE CASCADE,
+            character_name VARCHAR(255) NOT NULL,
+            role VARCHAR(100) NOT NULL DEFAULT 'Character',
+            background TEXT NOT NULL DEFAULT '',
+            is_player BOOLEAN NOT NULL DEFAULT TRUE,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        ALTER TABLE story_messages ADD COLUMN IF NOT EXISTS playthrough_id VARCHAR(36) NOT NULL DEFAULT 'legacy';
         """
         self.execute_query(ddl, fetch="none", commit=True)
+
+        # Idempotent backfill: give every legacy story a playthrough for its creator
+        self.execute_query("""
+        DO $$
+        DECLARE s RECORD; p VARCHAR(36);
+        BEGIN
+          FOR s IN SELECT id, creator_id, current_day, time_of_day FROM stories LOOP
+            IF NOT EXISTS (SELECT 1 FROM playthroughs p2 WHERE p2.story_id = s.id) THEN
+              p := substr(md5(random()::text || s.id), 1, 36);
+              INSERT INTO playthroughs (id, story_id, user_id, current_day, time_of_day, status, metadata, created_at, updated_at)
+              VALUES (p, s.id, s.creator_id, s.current_day, s.time_of_day, 'active', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+              UPDATE story_messages SET playthrough_id = p WHERE story_id = s.id AND playthrough_id = 'legacy';
+              INSERT INTO playthrough_characters (id, playthrough_id, character_name, role, background, is_player, metadata, created_at)
+              SELECT substr(md5(random()::text || sc.id), 1, 36), p, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP
+              FROM story_characters sc WHERE sc.story_id = s.id;
+            END IF;
+          END LOOP;
+        END $$;
+        """, fetch="none", commit=True)
 
         migrations = [
             """UPDATE users SET metadata = '{}'::jsonb WHERE metadata IS NULL;
@@ -303,7 +343,7 @@ class Database:
             (session_id, role, content, uid, json.dumps(merged)),
             fetch="none", commit=True)
 
-    # ── Stories ──
+    # ── Stories (templates) ──
     def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None, telemetry=None):
         if not self.database_url: return
         cid = creator_id or LEGACY_USER_ID
@@ -342,6 +382,17 @@ class Database:
             "FROM stories s WHERE s.creator_id = %s ORDER BY s.updated_at DESC",
             (user_id,), fetch="all") or []
 
+    def list_all_stories(self, user_id):
+        if not self.database_url: return []
+        return self.execute_query(
+            "SELECT s.id, s.title, s.genre, s.premise, s.is_premium, s.updated_at, u.username AS creator_name, "
+            "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
+            "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role, "
+            "(SELECT COUNT(*) FROM playthroughs p WHERE p.story_id = s.id AND p.user_id = %s) AS played_count "
+            "FROM stories s LEFT JOIN users u ON u.id = s.creator_id "
+            "ORDER BY s.updated_at DESC LIMIT 100",
+            (user_id,), fetch="all") or []
+
     def get_story(self, story_id):
         return self.execute_query(
             "SELECT * FROM stories WHERE id = %s", (story_id,), fetch="one")
@@ -372,7 +423,99 @@ class Database:
             (story_id, content, int(priority), bool(is_active)),
             fetch="none", commit=True)
 
-    # ── State updates (Phase 2) ──
+    # ── Playthroughs (per-user sessions) ──
+    def get_active_playthrough(self, story_id, user_id):
+        return self.execute_query(
+            "SELECT * FROM playthroughs WHERE story_id = %s AND user_id = %s AND status = 'active' "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (story_id, user_id), fetch="one")
+
+    def get_playthrough(self, playthrough_id):
+        return self.execute_query(
+            "SELECT * FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
+
+    def create_playthrough(self, story_id, user_id):
+        pid = str(uuid.uuid4())
+        def fn(cur):
+            cur.execute(
+                "INSERT INTO playthroughs (id, story_id, user_id, current_day, time_of_day, status, metadata, created_at, updated_at) "
+                "VALUES (%s, %s, %s, 1, 'Morning', 'active', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (pid, story_id, user_id))
+            cur.execute(
+                "INSERT INTO playthrough_characters (id, playthrough_id, character_name, role, background, is_player, metadata, created_at) "
+                "SELECT %s, %s, name, role, background, is_player, metadata, CURRENT_TIMESTAMP "
+                "FROM story_characters WHERE story_id = %s",
+                (str(uuid.uuid4()), pid, story_id))
+            cur.execute("SELECT * FROM playthroughs WHERE id = %s", (pid,))
+            return cur.fetchone()
+        return self._with_conn(fn, commit=True)
+
+    def get_playthrough_characters(self, playthrough_id):
+        return self.execute_query(
+            "SELECT id, character_name, role, background, is_player, metadata, created_at "
+            "FROM playthrough_characters WHERE playthrough_id = %s ORDER BY is_player DESC, created_at ASC",
+            (playthrough_id,), fetch="all") or []
+
+    def get_playthrough_messages(self, playthrough_id, limit=50):
+        return self.execute_query(
+            "SELECT id, role, content, message_type, created_at "
+            "FROM story_messages WHERE playthrough_id = %s ORDER BY id ASC LIMIT %s",
+            (playthrough_id, int(limit)), fetch="all") or []
+
+    def add_playthrough_message(self, story_id, playthrough_id, role, content, msg_type="narration", metadata=None, telemetry=None):
+        if not self.database_url: return
+        merged = _merge_telemetry(metadata, telemetry, telemetry_key="client_telemetry")
+        self.execute_query(
+            "INSERT INTO story_messages (story_id, playthrough_id, role, content, message_type, metadata, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+            (story_id, playthrough_id, role, content, msg_type or "narration", json.dumps(merged)),
+            fetch="none", commit=True)
+
+    def list_playthroughs_for_user(self, user_id):
+        if not self.database_url: return []
+        return self.execute_query(
+            "SELECT p.id AS playthrough_id, p.story_id, p.current_day, p.time_of_day, p.status, p.updated_at, "
+            "s.title, s.genre, s.premise, "
+            "(SELECT pc.character_name FROM playthrough_characters pc WHERE pc.playthrough_id = p.id AND pc.is_player = TRUE LIMIT 1) AS character_name, "
+            "(SELECT COUNT(*) FROM story_messages m WHERE m.playthrough_id = p.id) AS message_count "
+            "FROM playthroughs p JOIN stories s ON s.id = p.story_id "
+            "WHERE p.user_id = %s ORDER BY p.updated_at DESC LIMIT 100",
+            (user_id,), fetch="all") or []
+
+    # ── State updates (playthrough-scoped) ──
+    def update_playthrough_time(self, playthrough_id, day, time_of_day):
+        self.execute_query(
+            "UPDATE playthroughs SET current_day = %s, time_of_day = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (int(day), str(time_of_day), playthrough_id),
+            fetch="none", commit=True)
+
+    def update_playthrough_location(self, playthrough_id, location):
+        def fn(cur):
+            cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
+            row = cur.fetchone()
+            meta = (row["metadata"] if row and isinstance(row["metadata"], dict) else {}) or {}
+            meta["current_location"] = location
+            cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(meta), playthrough_id))
+        self._with_conn(fn, commit=True)
+
+    def update_playthrough_character_stat(self, playthrough_id, character_name, stat_name, new_value, max_value=999):
+        def fn(cur):
+            cur.execute(
+                "SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s AND LOWER(character_name) = LOWER(%s) LIMIT 1",
+                (playthrough_id, character_name))
+            row = cur.fetchone()
+            if not row: return False
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            stats = meta.get("stats", {})
+            stats[stat_name] = max(0, min(float(new_value), float(max_value)))
+            meta["stats"] = stats
+            cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
+                        (json.dumps(meta), row["id"]))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    # Legacy story-scoped state (kept for backward compat)
     def update_story_time(self, story_id, day, time_of_day):
         self.execute_query(
             "UPDATE stories SET current_day = %s, time_of_day = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
@@ -398,8 +541,7 @@ class Database:
             if not row: return False
             meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
             stats = meta.get("stats", {})
-            clamped = max(0, min(float(new_value), float(max_value)))
-            stats[stat_name] = clamped
+            stats[stat_name] = max(0, min(float(new_value), float(max_value)))
             meta["stats"] = stats
             cur.execute("UPDATE story_characters SET metadata = %s WHERE id = %s",
                         (json.dumps(meta), row["id"]))
