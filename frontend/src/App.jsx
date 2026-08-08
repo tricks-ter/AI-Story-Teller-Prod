@@ -10,7 +10,7 @@ import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
 import { streamChat } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
-import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError } from "./utils/auth";
+import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
 
 export default function App() {
   const [view, setView] = useState("landing");
@@ -67,7 +67,6 @@ export default function App() {
 
   const handleLogout = () => { clearAuth(); setUser(null); setStoryContext(null); setView("landing"); };
 
-  // ── Resume a saga: seed chat window from the story's DB history ──
   const handleOpenStory = async (story) => {
     setStoryContext(story);
     setView("chat");
@@ -96,10 +95,11 @@ export default function App() {
 
   const handleStartStory = async (storyData) => {
     try {
+      const enriched = await withTelemetry(storyData);
       const res = await fetch(`${BASE_URL}/stories`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify(storyData)
+        body: JSON.stringify(enriched)
       });
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));

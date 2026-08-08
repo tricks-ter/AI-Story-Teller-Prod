@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="3.4.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="3.5.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -44,6 +44,7 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=4096, ge=256, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=1.5)
     enable_thinking: bool = True
+    client_telemetry: Optional[dict] = None
 
 class StoryCreateRequest(BaseModel):
     title: str
@@ -52,11 +53,13 @@ class StoryCreateRequest(BaseModel):
     characterName: str
     characterRole: str
     characterBackground: str
+    client_telemetry: Optional[dict] = None
 
 class AuthRequest(BaseModel):
     username: str
     password: str
     remember_me: bool = False
+    client_telemetry: Optional[dict] = None
 
 router = APIRouter(prefix="/api")
 
@@ -96,16 +99,19 @@ def signup(req: AuthRequest):
         "last_login_at": datetime.now(timezone.utc).isoformat(),
         "created_via": "signup",
     }
-    ok = db.create_user_with_token(user_id, username, hash_password(req.password), token, expires, metadata=initial_meta)
+    ok = db.create_user_with_token(user_id, username, hash_password(req.password), token, expires,
+                                    metadata=initial_meta, telemetry=req.client_telemetry)
     if not ok: raise HTTPException(status_code=500, detail="Could not save account. Please try again.")
-    return {"token": token, "user": {"id": user_id, "username": username, "role": "user", "metadata": initial_meta}}
+    final_meta = dict(initial_meta)
+    final_meta["signup_telemetry"] = req.client_telemetry
+    return {"token": token, "user": {"id": user_id, "username": username, "role": "user", "metadata": final_meta}}
 
 @router.post("/auth/login")
 def login(req: AuthRequest):
     row = db.get_user_by_username(req.username.strip())
     if not row or not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    fresh_meta = db.touch_user_login(row["id"])
+    fresh_meta = db.touch_user_login(row["id"], telemetry=req.client_telemetry)
     token, expires = make_token(row["id"], req.remember_me)
     db.add_auth_token(token, row["id"], expires)
     return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"], "metadata": fresh_meta}}
@@ -151,11 +157,14 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
         "inventory": ["Starter Item"]
     }
 
-    db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta, creator_id=user["id"])
-    db.add_story_character(char_id, story_id, request.characterName, request.characterRole, request.characterBackground, metadata=char_meta)
+    telemetry = request.client_telemetry
+    db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,
+                    creator_id=user["id"], telemetry=telemetry)
+    db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
+                           request.characterBackground, metadata=char_meta, telemetry=telemetry)
 
     intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
-    db.add_story_message(story_id, "system", intro_msg, msg_type="intro")
+    db.add_story_message(story_id, "system", intro_msg, msg_type="intro", telemetry=telemetry)
 
     return {"story_id": story_id, "status": "created", "title": request.title}
 
@@ -173,10 +182,14 @@ async def chat_stream(request: ChatRequest, raw: Request):
         "stream": True,
     }
 
+    telemetry = request.client_telemetry
+
     last_msg = request.messages[-1]
     if last_msg.role == "user":
         db.ensure_session(request.session_id, last_msg.content[:50] if len(last_msg.content) > 50 else "New Chat", user_id=uid)
-        db.add_message(request.session_id, "user", last_msg.content, metadata={**base_meta, "role": "user"}, user_id=uid)
+        db.add_message(request.session_id, "user", last_msg.content,
+                       metadata={**base_meta, "role": "user"},
+                       user_id=uid, telemetry=telemetry)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None
     history = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -208,7 +221,8 @@ async def chat_stream(request: ChatRequest, raw: Request):
 
         if full_content:
             db.add_message(request.session_id, "assistant", full_content,
-                           metadata={**base_meta, "role": "assistant", "chars": len(full_content)}, user_id=uid)
+                           metadata={**base_meta, "role": "assistant", "chars": len(full_content)},
+                           user_id=uid, telemetry=telemetry)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

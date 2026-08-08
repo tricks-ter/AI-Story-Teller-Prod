@@ -1,4 +1,4 @@
-import { BASE_URL, authHeaders } from "./auth";
+import { BASE_URL, authHeaders, withTelemetry } from "./auth";
 
 export { BASE_URL };
 
@@ -15,10 +15,11 @@ export function streamChat(sessionId, messages, settings, onEvent, onError) {
 
   (async () => {
     try {
+      const enriched = await withTelemetry(body);
       const res = await fetch(`${BASE_URL}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify(body),
+        body: JSON.stringify(enriched),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) { onError(new Error(`HTTP ${res.status}`)); return; }

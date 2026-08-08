@@ -1,3 +1,5 @@
+import { getTelemetry } from "./telemetry";
+
 const TOKEN_KEY = "inkmind_token";
 const USER_KEY = "inkmind_user";
 
@@ -40,7 +42,6 @@ export function authHeaders() {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
-// ── Shared, always-visible error tooling (used by ALL future code) ──
 export async function parseJsonSafe(res) {
   const text = await res.text();
   try { return JSON.parse(text); }
@@ -63,6 +64,12 @@ export function describeNetworkError(err) {
   return err?.message || "Unexpected error.";
 }
 
+// ── Attach telemetry to any outgoing body without mutating the original ──
+export async function withTelemetry(body) {
+  const t = await getTelemetry();
+  return { ...(body || {}), client_telemetry: t };
+}
+
 export async function fetchMe() {
   const t = getToken();
   if (!t) return null;
@@ -70,4 +77,13 @@ export async function fetchMe() {
     const r = await fetch(`${BASE_URL}/auth/me`, { headers: authHeaders() });
     return r.ok ? await r.json() : null;
   } catch { return null; }
+}
+
+// ── Auth helpers with built-in telemetry ──
+export async function postAuth(action, body) {
+  return fetch(`${BASE_URL}/auth/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(await withTelemetry(body)),
+  });
 }
