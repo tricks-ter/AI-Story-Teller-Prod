@@ -1,7 +1,9 @@
-import React from "react";
-import { Heart, Sparkles, MapPin, Backpack } from "lucide-react";
+import React, { useState } from "react";
+import { Heart, Sparkles, MapPin, Backpack, ChevronDown, ChevronUp } from "lucide-react";
 
 export default function HUD({ storyContext }) {
+  const [invOpen, setInvOpen] = useState(false);
+
   if (!storyContext || !storyContext.characters) return null;
 
   const player = storyContext.characters.find(c => c.is_player) || storyContext.characters[0];
@@ -9,7 +11,7 @@ export default function HUD({ storyContext }) {
 
   const meta = player.metadata || {};
   const stats = meta.stats || {};
-  const inventory = meta.inventory || [];
+  const inventory = Array.isArray(meta.inventory) ? meta.inventory : [];
   const location = storyContext.current_location || "Unknown Realm";
 
   const hp = stats.Health ?? 100;
@@ -36,9 +38,9 @@ export default function HUD({ storyContext }) {
             <Heart size={10} /> <span>HP</span>
           </div>
           <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-            <div 
-              className="h-full bg-red-500 transition-all duration-500" 
-              style={{ width: `${hpPct}%` }} 
+            <div
+              className="h-full bg-red-500 transition-all duration-500"
+              style={{ width: `${hpPct}%` }}
             />
           </div>
           <span className="text-[9px] text-gray-500 mt-0.5 text-right">{Math.round(hp)}/{maxHp}</span>
@@ -50,9 +52,9 @@ export default function HUD({ storyContext }) {
             <Sparkles size={10} /> <span>MP</span>
           </div>
           <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-            <div 
-              className="h-full bg-blue-500 transition-all duration-500" 
-              style={{ width: `${manaPct}%` }} 
+            <div
+              className="h-full bg-blue-500 transition-all duration-500"
+              style={{ width: `${manaPct}%` }}
             />
           </div>
           <span className="text-[9px] text-gray-500 mt-0.5 text-right">{Math.round(mana)}/{maxMana}</span>
@@ -68,11 +70,34 @@ export default function HUD({ storyContext }) {
         ))}
       </div>
 
-      {/* Inventory Indicator */}
-      <div className="flex items-center gap-1 text-[10px] sm:text-xs text-amber-400">
-        <Backpack size={12} />
-        <span>{inventory.length} items</span>
-      </div>
+      {/* Inventory Toggle (44px tap target) */}
+      <button
+        onClick={() => setInvOpen(o => !o)}
+        className="flex items-center gap-1 text-[10px] sm:text-xs text-amber-400 min-h-[44px] min-w-[44px] justify-center rounded-xl hover:bg-gray-700/50 touch-manipulation active:scale-95"
+        title="Inventory"
+      >
+        <Backpack size={14} />
+        <span>{inventory.length}</span>
+        {invOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+      </button>
+
+      {/* Expandable Inventory Panel */}
+      {invOpen && (
+        <div className="w-full order-last bg-gray-900/90 border border-gray-700 rounded-xl p-3 animate-fade-in">
+          <h4 className="text-[10px] uppercase text-gray-500 font-bold mb-2">Inventory</h4>
+          {inventory.length === 0 ? (
+            <p className="text-xs text-gray-600">Empty — adventure to find items.</p>
+          ) : (
+            <ul className="flex flex-wrap gap-1.5">
+              {inventory.map((it, i) => (
+                <li key={`${it}-${i}`} className="px-2 py-1 bg-amber-500/10 text-amber-300 border border-amber-500/20 rounded-lg text-[11px]">
+                  {it}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

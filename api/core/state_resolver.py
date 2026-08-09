@@ -10,8 +10,9 @@ def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
       [TIME_UPDATE: Day X, TimeOfDay]
       [STAT_UPDATE: CharacterName.StatName = Value] or [STAT_UPDATE: CharacterName.StatName -10]
       [LOCATION_UPDATE: LocationName]
+      [ITEM_UPDATE: CharacterName + ItemName] or [ITEM_UPDATE: CharacterName - ItemName]
     """
-    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE):\s*([^\]]+)\]'
+    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE):\s*([^\]]+)\]'
     updates = []
 
     def replacer(match):
@@ -64,6 +65,16 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
 
         elif tag_type == "LOCATION_UPDATE":
             return {"type": "LOCATION_UPDATE", "location": payload.strip()}
+
+        elif tag_type == "ITEM_UPDATE":
+            # "CharacterName + Item Name" or "CharacterName - Item Name"
+            m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', payload)
+            if not m: return None
+            character = m.group(1).strip()
+            op = m.group(2)
+            item = m.group(3).strip()
+            if not character or not item: return None
+            return {"type": "ITEM_UPDATE", "character": character, "add": op == "+", "item": item}
 
     except Exception as e:
         return None

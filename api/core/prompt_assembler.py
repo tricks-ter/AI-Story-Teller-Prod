@@ -33,6 +33,8 @@ You may use hidden state tags on their own line to update world state:
   [STAT_UPDATE: CharacterName.StatName = NewValue]
   [STAT_UPDATE: CharacterName.StatName -10]
   [LOCATION_UPDATE: NewLocationName]
+  [ITEM_UPDATE: CharacterName + ItemName]  (add item to inventory)
+  [ITEM_UPDATE: CharacterName - ItemName]  (remove/consume item)
 Use tags sparingly, only when the narrative justifies it.
 
 [PLAYER AGENCY RULES - CRITICAL]

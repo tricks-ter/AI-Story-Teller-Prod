@@ -18,7 +18,8 @@ def apply_state_updates(playthrough_id: str, updates: list) -> list:
         try:
             utype = update.get("type")
             if utype == "TIME_UPDATE":
-                db.update_playthrough_time(playthrough_id, update["day"], update["time_of_day"])
+                safe_day = max(1, int(update["day"]))
+                db.update_playthrough_time(playthrough_id, safe_day, update["time_of_day"])
                 applied.append(update)
 
             elif utype == "STAT_UPDATE":
@@ -43,9 +44,13 @@ def apply_state_updates(playthrough_id: str, updates: list) -> list:
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
-                # ADDITIVE: Uses the new upsert method to track locations in the new table
                 db.upsert_playthrough_location(playthrough_id, update["location"])
                 applied.append(update)
+
+            elif utype == "ITEM_UPDATE":
+                if db.update_playthrough_character_inventory(
+                        playthrough_id, update["character"], update["item"], bool(update.get("add", True))):
+                    applied.append(update)
 
         except Exception as e:
             logger.error(f"Failed to apply state update {update}: {e}")

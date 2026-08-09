@@ -236,8 +236,7 @@ class Database:
             "FROM story_characters WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
             (story_id,), fetch="all") or []
 
-    # SECURITY FIX: base_only=True returns ONLY the author's template/intro rows
-    # (playthrough_id='legacy'), never any player's private playthrough turns.
+    # SECURITY: base_only=True returns ONLY the author's template/intro rows.
     def get_story_messages(self, story_id, limit=50, base_only=True):
         query = ("SELECT id, role, content, message_type, created_at "
                  "FROM story_messages WHERE story_id = %s")
@@ -285,8 +284,7 @@ class Database:
                 "SELECT substr(md5(random()::text || sc.id), 1, 36), %s, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP "
                 "FROM story_characters sc WHERE sc.story_id = %s",
                 (pid, story_id))
-            # SECURITY/UX FIX: seed this playthrough with ONLY the author's base
-            # intro rows (playthrough_id='legacy') — never other players' turns.
+            # SECURITY/UX: seed ONLY the author's base intro rows (playthrough_id='legacy').
             cur.execute(
                 "INSERT INTO story_messages (story_id, playthrough_id, role, content, message_type, metadata, created_at) "
                 "SELECT %s, %s, role, content, message_type, metadata, CURRENT_TIMESTAMP "
@@ -345,20 +343,33 @@ class Database:
                         (json.dumps(meta), playthrough_id))
         self._with_conn(fn, commit=True)
 
+    # ROBUST: race-proof upsert via ON CONFLICT on the unique expression index,
+    # with SAVEPOINT fallback if migration 0005 hasn't been applied yet.
     def upsert_playthrough_location(self, playthrough_id, location_name):
         def fn(cur):
             loc_id = str(uuid.uuid4())
-            cur.execute(
-                "SELECT id FROM locations WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s)",
-                (playthrough_id, location_name))
-            row = cur.fetchone()
-            if row:
-                cur.execute("UPDATE locations SET is_discovered = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
-            else:
+            cur.execute("SAVEPOINT loc_upsert")
+            try:
                 cur.execute(
                     "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, metadata, created_at, updated_at) "
-                    "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (playthrough_id, LOWER(name)) DO UPDATE SET is_discovered = TRUE, updated_at = CURRENT_TIMESTAMP",
                     (loc_id, playthrough_id, location_name))
+                cur.execute("RELEASE SAVEPOINT loc_upsert")
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT loc_upsert")
+                cur.execute(
+                    "SELECT id FROM locations WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s)",
+                    (playthrough_id, location_name))
+                row = cur.fetchone()
+                if row:
+                    cur.execute("UPDATE locations SET is_discovered = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+                else:
+                    cur.execute(
+                        "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, metadata, created_at, updated_at) "
+                        "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                        (loc_id, playthrough_id, location_name))
+
             cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
             pt_row = cur.fetchone()
             meta = (pt_row["metadata"] if pt_row and isinstance(pt_row["metadata"], dict) else {}) or {}
@@ -384,6 +395,27 @@ class Database:
             stats = meta.get("stats", {})
             stats[stat_name] = max(0, min(float(new_value), float(max_value)))
             meta["stats"] = stats
+            cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
+                        (json.dumps(meta), row["id"]))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    # NEW: live inventory management (ITEM_UPDATE tag)
+    def update_playthrough_character_inventory(self, playthrough_id, character_name, item_name, add=True):
+        def fn(cur):
+            cur.execute(
+                "SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s AND LOWER(character_name) = LOWER(%s) LIMIT 1",
+                (playthrough_id, character_name))
+            row = cur.fetchone()
+            if not row: return False
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            inv = meta.get("inventory", [])
+            if not isinstance(inv, list): inv = []
+            if add:
+                if item_name not in inv: inv.append(item_name)
+            else:
+                inv = [i for i in inv if str(i).lower() != str(item_name).lower()]
+            meta["inventory"] = inv
             cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
                         (json.dumps(meta), row["id"]))
             return True

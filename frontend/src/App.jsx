@@ -104,8 +104,7 @@ export default function App() {
 
       let seeded = (Array.isArray(msgData) ? msgData : []);
 
-      // SECURITY FIX: fallback fetches ONLY the author's base intro rows
-      // (base_only=true) — never other players' conversations.
+      // SECURITY: fallback fetches ONLY the author's base intro rows.
       if (seeded.length === 0) {
         const baseMsgRes = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=50&base_only=true`, { headers: authHeaders() });
         const baseMsgData = await parseJsonSafe(baseMsgRes);
@@ -204,6 +203,20 @@ export default function App() {
                   const stats = { ...(meta.stats || {}) };
                   stats[up.stat] = up.value;
                   meta.stats = stats;
+                  newChars[charIdx] = { ...c, metadata: meta };
+                }
+              } else if (up.type === "ITEM_UPDATE") {
+                const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
+                if (charIdx !== -1) {
+                  const c = newChars[charIdx];
+                  const meta = { ...(c.metadata || {}) };
+                  let inv = Array.isArray(meta.inventory) ? [...meta.inventory] : [];
+                  if (up.add) {
+                    if (!inv.includes(up.item)) inv.push(up.item);
+                  } else {
+                    inv = inv.filter(i => String(i).toLowerCase() !== String(up.item || "").toLowerCase());
+                  }
+                  meta.inventory = inv;
                   newChars[charIdx] = { ...c, metadata: meta };
                 }
               }
