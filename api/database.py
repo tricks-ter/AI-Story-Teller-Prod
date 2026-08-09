@@ -200,7 +200,7 @@ class Database:
             "SELECT role, content, created_at FROM chat_messages WHERE session_id = %s ORDER BY id DESC LIMIT 1",
             (session_id,), fetch="one")
 
-    # ── Stories (templates) ──
+    # ── Stories ──
     def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None, telemetry=None, is_public=True):
         if not self.database_url: return
         cid = creator_id or LEGACY_USER_ID
@@ -213,7 +213,6 @@ class Database:
                 (story_id, title, genre, premise, cid, bool(is_public), json.dumps(merged)),
                 fetch="none", commit=True)
         except Exception:
-            # Fallback if migration 0007 hasn't landed yet (deploy ordering safety)
             self.execute_query(
                 "INSERT INTO stories (id, title, genre, premise, current_day, time_of_day, creator_id, "
                 "is_premium, energy_cost, metadata, created_at, updated_at) "
@@ -336,6 +335,11 @@ class Database:
         return self.execute_query(
             "SELECT * FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
 
+    def complete_playthrough(self, playthrough_id):
+        self.execute_query(
+            "UPDATE playthroughs SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (playthrough_id,), fetch="none", commit=True)
+
     def create_playthrough(self, story_id, user_id):
         pid = str(uuid.uuid4())
         def fn(cur):
@@ -399,7 +403,7 @@ class Database:
             "WHERE p.user_id = %s ORDER BY p.updated_at DESC LIMIT 100",
             (user_id,), fetch="all") or []
 
-    # ── State updates (playthrough-scoped) ──
+    # ── State updates ──
     def update_playthrough_time(self, playthrough_id, day, time_of_day):
         self.execute_query(
             "UPDATE playthroughs SET current_day = %s, time_of_day = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
@@ -417,30 +421,37 @@ class Database:
             return True
         self._with_conn(fn, commit=True)
 
-    def upsert_playthrough_location(self, playthrough_id, location_name):
+    def upsert_playthrough_location(self, playthrough_id, location_name, description=""):
+        desc = description or ""
         def fn(cur):
             loc_id = str(uuid.uuid4())
             cur.execute("SAVEPOINT loc_upsert")
             try:
                 cur.execute(
-                    "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, metadata, created_at, updated_at) "
-                    "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
-                    "ON CONFLICT (playthrough_id, LOWER(name)) DO UPDATE SET is_discovered = TRUE, updated_at = CURRENT_TIMESTAMP",
-                    (loc_id, playthrough_id, location_name))
+                    "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, visit_count, last_visited_at, metadata, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, TRUE, 1, CURRENT_TIMESTAMP, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (playthrough_id, LOWER(name)) DO UPDATE SET is_discovered = TRUE, "
+                    "visit_count = locations.visit_count + 1, last_visited_at = CURRENT_TIMESTAMP, "
+                    "description = CASE WHEN COALESCE(locations.description, '') = '' AND %s <> '' THEN %s ELSE locations.description END, "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (loc_id, playthrough_id, location_name, desc, desc, desc))
                 cur.execute("RELEASE SAVEPOINT loc_upsert")
             except Exception:
                 cur.execute("ROLLBACK TO SAVEPOINT loc_upsert")
                 cur.execute(
-                    "SELECT id FROM locations WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s)",
+                    "SELECT id, description FROM locations WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s)",
                     (playthrough_id, location_name))
                 row = cur.fetchone()
                 if row:
-                    cur.execute("UPDATE locations SET is_discovered = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+                    new_desc = desc if not (row["description"] or "") else row["description"]
+                    cur.execute(
+                        "UPDATE locations SET is_discovered = TRUE, visit_count = visit_count + 1, last_visited_at = CURRENT_TIMESTAMP, description = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (new_desc, row["id"]))
                 else:
                     cur.execute(
-                        "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, metadata, created_at, updated_at) "
-                        "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                        (loc_id, playthrough_id, location_name))
+                        "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, visit_count, last_visited_at, metadata, created_at, updated_at) "
+                        "VALUES (%s, %s, %s, %s, TRUE, 1, CURRENT_TIMESTAMP, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                        (loc_id, playthrough_id, location_name, desc))
 
             cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
             pt_row = cur.fetchone()
@@ -455,6 +466,12 @@ class Database:
         return self.execute_query(
             "SELECT id, name, description, is_discovered, metadata, created_at, updated_at "
             "FROM locations WHERE playthrough_id = %s ORDER BY updated_at DESC",
+            (playthrough_id,), fetch="all") or []
+
+    def get_playthrough_map(self, playthrough_id):
+        return self.execute_query(
+            "SELECT id, name, description, visit_count, is_discovered, created_at, last_visited_at "
+            "FROM locations WHERE playthrough_id = %s ORDER BY created_at ASC",
             (playthrough_id,), fetch="all") or []
 
     def update_playthrough_character_stat(self, playthrough_id, character_name, stat_name, new_value, max_value=999):
@@ -524,7 +541,7 @@ class Database:
         cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
                     (json.dumps(meta), character_id))
 
-    # ── Inventory / Equipment / Backpacks (Phase 4) ──
+    # ── Inventory / Equipment / Backpacks ──
     def ensure_playthrough_inventory(self, playthrough_id):
         def fn(cur):
             cur.execute("SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s", (playthrough_id,))
@@ -699,6 +716,35 @@ class Database:
                 cur.execute("UPDATE playthrough_items SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
             return True
         return self._with_conn(fn, commit=True) is True
+
+    def use_item(self, playthrough_id, character_id, item_id):
+        def fn(cur):
+            cur.execute("SELECT * FROM playthrough_items WHERE id = %s AND playthrough_id = %s", (item_id, playthrough_id))
+            item = cur.fetchone()
+            if not item: return {"ok": False, "reason": "not_found"}
+            if item["character_id"] != character_id: return {"ok": False, "reason": "not_owner"}
+            if item["item_type"] != "consumable": return {"ok": False, "reason": "not_usable"}
+            cur.execute("DELETE FROM playthrough_equipment WHERE item_id = %s", (item_id,))
+            if int(item["quantity"]) <= 1:
+                cur.execute("DELETE FROM playthrough_items WHERE id = %s", (item_id,))
+                self._sync_inventory_mirror(cur, character_id, item["name"], False)
+            else:
+                cur.execute("UPDATE playthrough_items SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (item_id,))
+            return {"ok": True, "name": item["name"]}
+        return self._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
+
+    def drop_item(self, playthrough_id, character_id, item_id):
+        def fn(cur):
+            cur.execute("SELECT * FROM playthrough_items WHERE id = %s AND playthrough_id = %s", (item_id, playthrough_id))
+            item = cur.fetchone()
+            if not item: return {"ok": False, "reason": "not_found"}
+            if item["character_id"] != character_id: return {"ok": False, "reason": "not_owner"}
+            if item["item_type"] == "quest": return {"ok": False, "reason": "quest_locked"}
+            cur.execute("DELETE FROM playthrough_equipment WHERE item_id = %s", (item_id,))
+            cur.execute("DELETE FROM playthrough_items WHERE id = %s", (item_id,))
+            self._sync_inventory_mirror(cur, character_id, item["name"], False)
+            return {"ok": True, "name": item["name"]}
+        return self._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
 
     def equip_item(self, playthrough_id, character_id, item_id):
         def fn(cur):

@@ -5,17 +5,17 @@ VALID_TIMES = {"Morning", "Afternoon", "Evening", "Night"}
 
 def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Extracts hidden state tags from AI response and returns clean text + structured updates.
     Tags:
       [TIME_UPDATE: Day X, TimeOfDay]
-      [STAT_UPDATE: CharacterName.StatName = Value] or [STAT_UPDATE: CharacterName.StatName -10]
-      [LOCATION_UPDATE: LocationName]
-      [ITEM_UPDATE: CharacterName + ItemName | type=weapon, slot=main_hand, rarity=rare, level=4, weight=3, bonus.Health=10, desc=Short description]
+      [STAT_UPDATE: CharacterName.StatName = Value] / [STAT_UPDATE: CharacterName.StatName -10]
+      [LOCATION_UPDATE: LocationName | desc=Short chronicle of the place]
+      [ITEM_UPDATE: CharacterName + ItemName | type=..., slot=..., rarity=..., level=..., weight=..., bonus.X=..., desc=...]
       [ITEM_UPDATE: CharacterName - ItemName]
-      [ABILITY_UPDATE: CharacterName + Ability Name | desc=What it does]
+      [ABILITY_UPDATE: CharacterName + Ability Name | desc=...]
       [BAG_UPDATE: CharacterName level N]
+      [SAGA_END]
     """
-    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE):\s*([^\]]+)\]'
+    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|SAGA_END):\s*([^\]]*)\]'
     updates = []
 
     def replacer(match):
@@ -87,20 +87,20 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
                 char_stat = m.group(1).strip()
                 value = float(m.group(2))
                 is_delta = True
-
             parts = char_stat.split(".", 1)
             if len(parts) != 2: return None
             character, stat = parts
-            return {
-                "type": "STAT_UPDATE",
-                "character": character.strip(),
-                "stat": stat.strip(),
-                "value": value,
-                "is_delta": is_delta
-            }
+            return {"type": "STAT_UPDATE", "character": character.strip(), "stat": stat.strip(), "value": value, "is_delta": is_delta}
 
         elif tag_type == "LOCATION_UPDATE":
-            return {"type": "LOCATION_UPDATE", "location": payload.strip()}
+            main_part = payload
+            attrs = {}
+            if "|" in payload:
+                main_part, attr_part = payload.split("|", 1)
+                attrs = _parse_attrs(attr_part)
+            name = main_part.strip()
+            if not name: return None
+            return {"type": "LOCATION_UPDATE", "location": name, "description": attrs.get("description", "")}
 
         elif tag_type == "ITEM_UPDATE":
             main_part = payload
@@ -110,9 +110,7 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
                 attrs = _parse_attrs(attr_part)
             m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
             if not m: return None
-            character = m.group(1).strip()
-            op = m.group(2)
-            item = m.group(3).strip()
+            character = m.group(1).strip(); op = m.group(2); item = m.group(3).strip()
             if not character or not item: return None
             return {"type": "ITEM_UPDATE", "character": character, "add": op == "+", "item": item, "attrs": attrs}
 
@@ -124,25 +122,19 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
                 attrs = _parse_attrs(attr_part)
             m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
             if not m: return None
-            character = m.group(1).strip()
-            op = m.group(2)
-            ability = m.group(3).strip()
+            character = m.group(1).strip(); op = m.group(2); ability = m.group(3).strip()
             if not character or not ability: return None
-            return {
-                "type": "ABILITY_UPDATE",
-                "character": character,
-                "add": op == "+",
-                "ability": ability,
-                "description": attrs.get("description", "")
-            }
+            return {"type": "ABILITY_UPDATE", "character": character, "add": op == "+", "ability": ability, "description": attrs.get("description", "")}
 
         elif tag_type == "BAG_UPDATE":
             m = re.match(r'^(.+?)\s+(?:level|=)\s*(\d+)$', payload, re.IGNORECASE)
             if not m: return None
-            character = m.group(1).strip()
-            level = int(m.group(2))
+            character = m.group(1).strip(); level = int(m.group(2))
             if not character: return None
             return {"type": "BAG_UPDATE", "character": character, "level": level}
+
+        elif tag_type == "SAGA_END":
+            return {"type": "SAGA_END"}
 
     except Exception as e:
         return None

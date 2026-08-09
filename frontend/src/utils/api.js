@@ -10,13 +10,6 @@ function clampRetryAfter(v) {
   return Math.min(10, Math.max(1, n));
 }
 
-/**
- * Industrial-grade SSE transport:
- *  - one automatic retry on 429 (HTTP-level or SSE error event),
- *  - ONLY when no content was streamed yet (never duplicates narration),
- *  - honors Retry-After (clamped 1–10s),
- *  - synthesizes a final `done` if the connection dies silently (prevents UI hang).
- */
 async function runStream(url, body, controller, onEvent, onError) {
   const MAX_ATTEMPTS = 2;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -87,10 +80,7 @@ async function runStream(url, body, controller, onEvent, onError) {
       onEvent({ type: "error", message: retryInfo.message || "The AI engine is rate-limited (429). Please wait a moment and try again." });
       return;
     }
-    // Silent EOF (connection died mid-stream): finalize gracefully so UI never hangs.
-    if (!sawTerminal) {
-      onEvent({ type: "done" });
-    }
+    if (!sawTerminal) onEvent({ type: "done" });
     return;
   }
 }
@@ -122,44 +112,41 @@ export function streamStory(storyId, userAction, settings, onEvent, onError) {
   return () => controller.abort();
 }
 
-// ── Phase 4: Inventory / Equipment ──
+async function postAction(path, payload) {
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(payload),
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok) return { ok: false, detail: data?.detail || `HTTP ${res.status}` };
+    return { ok: true, data };
+  } catch {
+    return { ok: false, detail: "Connection error" };
+  }
+}
+
 export async function fetchInventory(playthroughId) {
   try {
     const res = await fetch(`${BASE_URL}/playthroughs/${playthroughId}/inventory`, { headers: authHeaders() });
     const data = await parseJsonSafe(res);
     if (!res.ok) return null;
     return data;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-export async function equipItem(playthroughId, itemId) {
+export async function fetchMap(playthroughId) {
   try {
-    const res = await fetch(`${BASE_URL}/playthroughs/${playthroughId}/equip`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ item_id: itemId }),
-    });
+    const res = await fetch(`${BASE_URL}/playthroughs/${playthroughId}/map`, { headers: authHeaders() });
     const data = await parseJsonSafe(res);
-    if (!res.ok) return { ok: false, detail: data?.detail || `HTTP ${res.status}` };
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, detail: "Connection error" };
-  }
+    if (!res.ok) return null;
+    return data;
+  } catch { return null; }
 }
 
-export async function unequipItem(playthroughId, itemId) {
-  try {
-    const res = await fetch(`${BASE_URL}/playthroughs/${playthroughId}/unequip`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ item_id: itemId }),
-    });
-    const data = await parseJsonSafe(res);
-    if (!res.ok) return { ok: false, detail: data?.detail || `HTTP ${res.status}` };
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, detail: "Connection error" };
-  }
-}
+export const equipItem = (pid, itemId) => postAction(`/playthroughs/${pid}/equip`, { item_id: itemId });
+export const unequipItem = (pid, itemId) => postAction(`/playthroughs/${pid}/unequip`, { item_id: itemId });
+export const useItem = (pid, itemId) => postAction(`/playthroughs/${pid}/use`, { item_id: itemId });
+export const dropItem = (pid, itemId) => postAction(`/playthroughs/${pid}/drop`, { item_id: itemId });
+export const completePlaythrough = (pid) => postAction(`/playthroughs/${pid}/complete`, {});

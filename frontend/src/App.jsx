@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Menu, X, AlertCircle, Settings2, Home, Info } from "lucide-react";
+import { Menu, X, AlertCircle, Settings2, Home, Info, Flag, Trophy } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import ChatWindow from "./components/ChatWindow";
 import ChatInput from "./components/ChatInput";
@@ -9,7 +9,7 @@ import StoryCreator from "./components/StoryCreator";
 import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
 import HUD from "./components/HUD";
-import { streamChat, streamStory } from "./utils/api";
+import { streamChat, streamStory, completePlaythrough } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
 
@@ -30,14 +30,13 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [confirmEnd, setConfirmEnd] = useState(false);
   const [settings, setSettings] = useState(loadSettings);
   const stopRef = useRef(null);
 
   useEffect(() => { setSessions(listSessions()); }, []);
   useEffect(() => { saveSettings(settings); }, [settings]);
-
   useEffect(() => { fetch(`${BASE_URL}/health`).catch(() => {}); }, []);
-
   useEffect(() => {
     if (getToken()) {
       fetchMe().then(u => { if (u) setUser(u); else { clearAuth(); setUser(null); } });
@@ -70,9 +69,25 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    // Revoke the token server-side (best effort), then clear locally
     fetch(`${BASE_URL}/auth/logout`, { method: "POST", headers: authHeaders() }).catch(() => {});
     clearAuth(); setUser(null); setStoryContext(null); setView("landing");
+  };
+
+  const handleEndJourney = async () => {
+    if (!storyContext?.playthrough_id) return;
+    if (!confirmEnd) {
+      setConfirmEnd(true);
+      setTimeout(() => setConfirmEnd(false), 3000);
+      return;
+    }
+    setConfirmEnd(false);
+    const res = await completePlaythrough(storyContext.playthrough_id);
+    if (res.ok) {
+      setStoryContext(prev => ({ ...prev, status: "completed" }));
+      setNotice("🏁 Saga completed — well played!");
+    } else {
+      setError(res.detail || "Could not complete the saga.");
+    }
   };
 
   const handleOpenStory = async (story) => {
@@ -98,6 +113,7 @@ export default function App() {
         playthrough_id: pt.id,
         current_day: pt.current_day,
         time_of_day: pt.time_of_day,
+        status: pt.status,
         characters: playData.characters || [],
         current_location: pt.metadata?.current_location || "Unknown Realm",
       });
@@ -107,13 +123,10 @@ export default function App() {
       if (!msgRes.ok) throw new Error(friendlyHttp(msgRes.status, msgData?.detail));
 
       let seeded = (Array.isArray(msgData) ? msgData : []);
-
       if (seeded.length === 0) {
         const baseMsgRes = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=50&base_only=true`, { headers: authHeaders() });
         const baseMsgData = await parseJsonSafe(baseMsgRes);
-        if (baseMsgRes.ok && Array.isArray(baseMsgData) && baseMsgData.length > 0) {
-          seeded = baseMsgData;
-        }
+        if (baseMsgRes.ok && Array.isArray(baseMsgData) && baseMsgData.length > 0) seeded = baseMsgData;
       }
 
       const mapped = seeded.map(m => ({
@@ -123,7 +136,6 @@ export default function App() {
         timestamp: m.created_at,
         narrative: true
       }));
-
       setMessages(mapped);
       mapped.forEach(m => appendMessage(session.session_id, m));
     } catch (err) {
@@ -157,6 +169,7 @@ export default function App() {
   const sendMessage = useCallback((text) => {
     const msg = typeof text === "string" ? text.trim() : "";
     if (!msg || isStreaming) return;
+    if (storyContext?.status === "completed") return;
     setInputValue(""); setError(null); setIsStreaming(true); setStreamingMsg(null); setStatusText("connecting…");
 
     let sessionId = activeSessionId;
@@ -210,6 +223,7 @@ export default function App() {
               ...prev,
               current_day: event.day ?? prev.current_day,
               time_of_day: event.time_of_day ?? prev.time_of_day,
+              status: event.status ?? prev.status,
             };
             let newChars = [...(prev.characters || [])];
             for (const up of event.updates || []) {
@@ -231,11 +245,8 @@ export default function App() {
                   const c = newChars[charIdx];
                   const meta = { ...(c.metadata || {}) };
                   let inv = Array.isArray(meta.inventory) ? [...meta.inventory] : [];
-                  if (up.add) {
-                    if (!inv.includes(up.item)) inv.push(up.item);
-                  } else {
-                    inv = inv.filter(i => String(i).toLowerCase() !== String(up.item || "").toLowerCase());
-                  }
+                  if (up.add) { if (!inv.includes(up.item)) inv.push(up.item); }
+                  else { inv = inv.filter(i => String(i).toLowerCase() !== String(up.item || "").toLowerCase()); }
                   meta.inventory = inv;
                   newChars[charIdx] = { ...c, metadata: meta };
                 }
@@ -247,11 +258,8 @@ export default function App() {
                   let ab = Array.isArray(meta.abilities) ? [...meta.abilities] : [];
                   if (up.add) {
                     const idx = ab.findIndex(a => a && a.name && a.name.toLowerCase() === (up.ability || "").toLowerCase());
-                    if (idx !== -1) {
-                      if (up.description) ab[idx] = { ...ab[idx], description: up.description };
-                    } else {
-                      ab.push({ name: up.ability, description: up.description || "" });
-                    }
+                    if (idx !== -1) { if (up.description) ab[idx] = { ...ab[idx], description: up.description }; }
+                    else ab.push({ name: up.ability, description: up.description || "" });
                   } else {
                     ab = ab.filter(a => !(a && a.name && a.name.toLowerCase() === (up.ability || "").toLowerCase()));
                   }
@@ -298,6 +306,7 @@ export default function App() {
   };
 
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
+  const storyCompleted = storyContext?.status === "completed";
 
   if (view === "landing") return <LandingPage onSelectChat={() => requireAuth("chat")} onSelectStory={() => requireAuth("story")} user={user} onSignIn={() => { setPendingAction(null); setView("auth"); }} onLogout={handleLogout} />;
   if (view === "auth") return <AuthPage onAuthed={handleAuthed} onBack={() => setView("landing")} />;
@@ -325,6 +334,11 @@ export default function App() {
                 : "Advanced reasoning model"}
             </p>
           </div>
+          {storyContext && !storyCompleted && (
+            <button onClick={handleEndJourney} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 hover:text-red-400 min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="End journey">
+              {confirmEnd ? <span className="text-[10px] font-bold text-red-400 px-0.5">Sure?</span> : <Flag size={18} />}
+            </button>
+          )}
           <button onClick={() => setSettingsOpen(true)} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors touch-manipulation" title="Settings">
             <Settings2 size={18} />
           </button>
@@ -347,9 +361,18 @@ export default function App() {
             <button onClick={() => setNotice(null)} className="p-1.5 text-amber-500 hover:text-amber-300 touch-manipulation"><X size={14} /></button>
           </div>
         )}
+        {storyCompleted && (
+          <div className="flex items-center gap-2 px-4 py-3 bg-purple-500/10 border-b border-purple-500/20 text-purple-300 text-sm flex-shrink-0">
+            <Trophy size={15} className="flex-shrink-0" />
+            <span className="flex-1 text-[13px] sm:text-sm">This saga is complete.</span>
+            <button onClick={() => handleOpenStory(storyContext)} className="px-3 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold min-h-[44px] touch-manipulation active:scale-95">
+              Start New Journey
+            </button>
+          </div>
+        )}
         {storyContext && <HUD storyContext={storyContext} />}
         <ChatWindow messages={messages} streamingMsg={streamingMsg} isStreaming={isStreaming} statusText={statusText} onSuggestion={handleSuggestion} isStory={!!storyContext} />
-        <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onStop={handleStop} onOpenSettings={() => setSettingsOpen(true)} onToggleThinking={handleToggleThinking} isStreaming={isStreaming} disabled={false} settings={settings} />
+        <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onStop={handleStop} onOpenSettings={() => setSettingsOpen(true)} onToggleThinking={handleToggleThinking} isStreaming={isStreaming || storyCompleted} disabled={isStreaming || storyCompleted} settings={settings} />
       </div>
     </div>
   );

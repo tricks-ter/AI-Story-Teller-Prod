@@ -13,40 +13,34 @@ from database import db
 logger = logging.getLogger(__name__)
 
 def apply_state_updates(playthrough_id: str, updates: list) -> dict:
-    """Returns {"applied": [...], "rejected": [...]}."""
     applied = []
     rejected = []
     for update in updates:
         try:
             utype = update.get("type")
             if utype == "TIME_UPDATE":
-                safe_day = max(1, int(update["day"]))
-                db.update_playthrough_time(playthrough_id, safe_day, update["time_of_day"])
+                db.update_playthrough_time(playthrough_id, max(1, int(update["day"])), update["time_of_day"])
                 applied.append(update)
 
             elif utype == "STAT_UPDATE":
                 char_name = update["character"]
                 stat_name = update["stat"]
                 new_value = update["value"]
-                is_delta = update.get("is_delta", False)
-
-                if is_delta:
+                if update.get("is_delta", False):
                     chars = db.get_playthrough_characters(playthrough_id)
                     current = None
                     for c in chars:
                         if c["character_name"].lower() == char_name.lower():
                             meta = c.get("metadata") or {}
-                            stats = meta.get("stats", {})
-                            current = stats.get(stat_name, 100)
+                            current = (meta.get("stats", {})).get(stat_name, 100)
                             break
                     if current is not None:
                         new_value = float(current) + float(new_value)
-
                 if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=999):
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
-                if db.upsert_playthrough_location(playthrough_id, update["location"]):
+                if db.upsert_playthrough_location(playthrough_id, update["location"], update.get("description", "")):
                     applied.append(update)
                 else:
                     rejected.append({**update, "reason": "location_error"})
@@ -54,28 +48,20 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
             elif utype == "ITEM_UPDATE":
                 char_id = _resolve_character_id(playthrough_id, update["character"])
                 if not char_id:
-                    rejected.append({**update, "reason": "character_not_found"})
-                    continue
+                    rejected.append({**update, "reason": "character_not_found"}); continue
                 if update.get("add", True):
                     res = db.grant_playthrough_item(playthrough_id, char_id, update["item"], update.get("attrs") or {})
-                    if res.get("ok"):
-                        applied.append(update)
-                    else:
-                        rejected.append({**update, "reason": res.get("reason", "rejected")})
+                    if res.get("ok"): applied.append(update)
+                    else: rejected.append({**update, "reason": res.get("reason", "rejected")})
                 else:
-                    if db.consume_playthrough_item(playthrough_id, char_id, update["item"]):
-                        applied.append(update)
-                    else:
-                        rejected.append({**update, "reason": "item_not_found"})
+                    if db.consume_playthrough_item(playthrough_id, char_id, update["item"]): applied.append(update)
+                    else: rejected.append({**update, "reason": "item_not_found"})
 
             elif utype == "ABILITY_UPDATE":
                 char_id = _resolve_character_id(playthrough_id, update["character"])
                 if not char_id:
-                    rejected.append({**update, "reason": "character_not_found"})
-                    continue
-                if db.update_playthrough_character_ability(
-                        playthrough_id, char_id, update["ability"],
-                        bool(update.get("add", True)), update.get("description", "")):
+                    rejected.append({**update, "reason": "character_not_found"}); continue
+                if db.update_playthrough_character_ability(playthrough_id, char_id, update["ability"], bool(update.get("add", True)), update.get("description", "")):
                     applied.append(update)
                 else:
                     rejected.append({**update, "reason": "character_not_found"})
@@ -89,6 +75,10 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                 else:
                     rejected.append({**update, "reason": "backpack_error"})
 
+            elif utype == "SAGA_END":
+                db.complete_playthrough(playthrough_id)
+                applied.append(update)
+
         except Exception as e:
             logger.error(f"Failed to apply state update {update}: {e}")
             rejected.append({**update, "reason": "internal_error"})
@@ -97,8 +87,7 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
     return {"applied": applied, "rejected": rejected}
 
 def _resolve_character_id(playthrough_id: str, character_name: str):
-    chars = db.get_playthrough_characters(playthrough_id)
-    for c in chars:
+    for c in db.get_playthrough_characters(playthrough_id):
         if c["character_name"].lower() == character_name.lower():
             return c["id"]
     return None

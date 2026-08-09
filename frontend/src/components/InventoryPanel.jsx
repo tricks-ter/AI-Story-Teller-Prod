@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { X, Backpack, Shield, Sword, Gem, FlaskConical, Package, Scroll, Sparkles } from "lucide-react";
-import { fetchInventory, equipItem, unequipItem } from "../utils/api";
+import { X, Backpack, Shield, Sword, Gem, FlaskConical, Package, Scroll, Sparkles, Trash2 } from "lucide-react";
+import { fetchInventory, equipItem, unequipItem, useItem, dropItem } from "../utils/api";
 
 const RARITY_STYLE = {
   common: "border-gray-600 text-gray-300",
@@ -23,8 +23,7 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
   const playerId = (characters || []).find(c => c.is_player)?.id || (characters || [])[0]?.id;
 
   const load = useCallback(async () => {
-    const inv = await fetchInventory(playthroughId);
-    setData(inv);
+    setData(await fetchInventory(playthroughId));
   }, [playthroughId]);
 
   useEffect(() => { load(); }, [load]);
@@ -36,17 +35,9 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
   const bonuses = (data?.bonuses || {})[playerId] || {};
   const bonusText = Object.entries(bonuses).map(([k, v]) => `+${v} ${k}`).join(", ");
 
-  const doEquip = async (itemId) => {
+  const run = async (fn, itemId) => {
     setBusy(itemId); setMsg("");
-    const res = await equipItem(playthroughId, itemId);
-    if (!res.ok) setMsg(res.detail);
-    await load();
-    setBusy(null);
-  };
-
-  const doUnequip = async (itemId) => {
-    setBusy(itemId); setMsg("");
-    const res = await unequipItem(playthroughId, itemId);
+    const res = await fn(playthroughId, itemId);
     if (!res.ok) setMsg(res.detail);
     await load();
     setBusy(null);
@@ -80,9 +71,7 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
           <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
             <div className={`h-full ${barColor} transition-all duration-500`} style={{ width: `${pct}%` }} />
           </div>
-          {bonusText && (
-            <p className="text-[11px] text-emerald-400 mt-2">Gear bonuses: {bonusText}</p>
-          )}
+          {bonusText && <p className="text-[11px] text-emerald-400 mt-2">Gear bonuses: {bonusText}</p>}
           {msg && <p className="text-[11px] text-red-400 mt-2">{msg}</p>}
         </div>
 
@@ -115,11 +104,8 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
                   <li key={e.id} className={`flex items-center gap-2 px-3 py-2 rounded-xl border bg-gray-800/50 ${RARITY_STYLE[e.rarity] || RARITY_STYLE.common}`}>
                     <span className="text-[10px] uppercase text-gray-500 w-16 flex-shrink-0">{e.slot.replace("_", " ")}</span>
                     <span className="flex-1 text-xs truncate">{e.item_name} <span className="text-gray-500">lv{e.item_level}</span></span>
-                    <button
-                      onClick={() => doUnequip(e.item_id)}
-                      disabled={busy === e.item_id}
-                      className="px-3 min-h-[44px] rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 text-[11px] font-medium touch-manipulation active:scale-95 disabled:opacity-50"
-                    >
+                    <button onClick={() => run(unequipItem, e.item_id)} disabled={busy === e.item_id}
+                      className="px-3 min-h-[44px] rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 text-[11px] font-medium touch-manipulation active:scale-95 disabled:opacity-50">
                       {busy === e.item_id ? "…" : "Unequip"}
                     </button>
                   </li>
@@ -136,27 +122,37 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
               <ul className="space-y-2">
                 {carried.map(i => {
                   const Icon = TYPE_ICON[i.item_type] || Package;
-                  const equippable = !!i.slot;
                   const desc = i.metadata?.description;
                   return (
-                    <li key={i.id} className={`flex items-start gap-2 px-3 py-2 rounded-xl border bg-gray-800/50 ${RARITY_STYLE[i.rarity] || RARITY_STYLE.common}`}>
-                      <Icon size={14} className="flex-shrink-0 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs truncate">{i.name}{i.quantity > 1 ? ` ×${i.quantity}` : ""}</p>
-                        <p className="text-[10px] text-gray-500">
-                          {i.item_type} · lv{i.item_level} · w{i.weight} · {i.rarity}
-                        </p>
-                        {desc && <p className="text-[10px] text-gray-400 mt-0.5">{desc}</p>}
+                    <li key={i.id} className={`px-3 py-2 rounded-xl border bg-gray-800/50 ${RARITY_STYLE[i.rarity] || RARITY_STYLE.common}`}>
+                      <div className="flex items-start gap-2">
+                        <Icon size={14} className="flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs truncate">{i.name}{i.quantity > 1 ? ` ×${i.quantity}` : ""}</p>
+                          <p className="text-[10px] text-gray-500">{i.item_type} · lv{i.item_level} · w{i.weight} · {i.rarity}</p>
+                          {desc && <p className="text-[10px] text-gray-400 mt-0.5">{desc}</p>}
+                        </div>
                       </div>
-                      {equippable && (
-                        <button
-                          onClick={() => doEquip(i.id)}
-                          disabled={busy === i.id}
-                          className="px-3 min-h-[44px] rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-medium touch-manipulation active:scale-95 disabled:opacity-50"
-                        >
-                          {busy === i.id ? "…" : "Equip"}
-                        </button>
-                      )}
+                      <div className="flex gap-2 mt-2">
+                        {i.slot && (
+                          <button onClick={() => run(equipItem, i.id)} disabled={busy === i.id}
+                            className="flex-1 min-h-[44px] rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-medium touch-manipulation active:scale-95 disabled:opacity-50">
+                            {busy === i.id ? "…" : "Equip"}
+                          </button>
+                        )}
+                        {i.item_type === "consumable" && (
+                          <button onClick={() => run(useItem, i.id)} disabled={busy === i.id}
+                            className="flex-1 min-h-[44px] rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-medium touch-manipulation active:scale-95 disabled:opacity-50">
+                            {busy === i.id ? "…" : "Use"}
+                          </button>
+                        )}
+                        {i.item_type !== "quest" && (
+                          <button onClick={() => run(dropItem, i.id)} disabled={busy === i.id}
+                            className="px-3 min-h-[44px] rounded-lg bg-gray-700 hover:bg-red-600/60 text-gray-300 text-[11px] touch-manipulation active:scale-95 disabled:opacity-50">
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </div>
                     </li>
                   );
                 })}
