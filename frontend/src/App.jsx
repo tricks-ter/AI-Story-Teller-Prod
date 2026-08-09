@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Menu, X, AlertCircle, Settings2, Home } from "lucide-react";
+import { Menu, X, AlertCircle, Settings2, Home, Info } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import ChatWindow from "./components/ChatWindow";
 import ChatInput from "./components/ChatInput";
@@ -29,13 +29,13 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [settings, setSettings] = useState(loadSettings);
   const stopRef = useRef(null);
 
   useEffect(() => { setSessions(listSessions()); }, []);
   useEffect(() => { saveSettings(settings); }, [settings]);
 
-  // Pre-warm the serverless backend so auth/library/continue are fast
   useEffect(() => { fetch(`${BASE_URL}/health`).catch(() => {}); }, []);
 
   useEffect(() => {
@@ -77,7 +77,7 @@ export default function App() {
     const session = createSession();
     refreshSessions();
     setActiveSessionId(session.session_id);
-    setStreamingMsg(null); setStatusText(""); setError(null); setSidebarOpen(false);
+    setStreamingMsg(null); setStatusText(""); setError(null); setNotice(null); setSidebarOpen(false);
     setMessages([]);
     try {
       const playRes = await fetch(`${BASE_URL}/stories/${story.id}/play`, {
@@ -104,7 +104,6 @@ export default function App() {
 
       let seeded = (Array.isArray(msgData) ? msgData : []);
 
-      // SECURITY: fallback fetches ONLY the author's base intro rows.
       if (seeded.length === 0) {
         const baseMsgRes = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=50&base_only=true`, { headers: authHeaders() });
         const baseMsgData = await parseJsonSafe(baseMsgRes);
@@ -185,6 +184,16 @@ export default function App() {
           const cleanContent = event.clean_content || assistantContent;
           assistantContent = cleanContent;
           setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: cleanContent, narrative: true, timestamp: new Date().toISOString() }));
+
+          if (Array.isArray(event.rejected) && event.rejected.length) {
+            const texts = event.rejected.map(r => {
+              const label = r.item || "Item";
+              const why = (r.reason || "rejected").replace(/_/g, " ");
+              return `${label} left behind (${why})`;
+            });
+            setNotice("🎒 " + texts.join(" · "));
+          }
+
           setStoryContext((prev) => {
             let newContext = {
               ...prev,
@@ -299,6 +308,13 @@ export default function App() {
             <AlertCircle size={15} className="flex-shrink-0" />
             <span className="flex-1 text-[13px] sm:text-sm">{error}</span>
             <button onClick={() => setError(null)} className="p-1.5 text-red-500 hover:text-red-300 touch-manipulation"><X size={14} /></button>
+          </div>
+        )}
+        {notice && (
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-sm animate-fade-in flex-shrink-0">
+            <Info size={15} className="flex-shrink-0" />
+            <span className="flex-1 text-[12px] sm:text-sm">{notice}</span>
+            <button onClick={() => setNotice(null)} className="p-1.5 text-amber-500 hover:text-amber-300 touch-manipulation"><X size={14} /></button>
           </div>
         )}
         {storyContext && <HUD storyContext={storyContext} />}

@@ -21,6 +21,12 @@ def _merge_telemetry(existing, telemetry, telemetry_key="client_telemetry"):
     return out
 
 class Database:
+    VALID_TYPES = {"weapon", "armor", "accessory", "consumable", "material", "quest"}
+    VALID_SLOTS = {"main_hand", "off_hand", "head", "body", "ring", "amulet", "trinket"}
+    VALID_RARITIES = {"common", "uncommon", "rare", "epic", "legendary"}
+    STACKABLE_TYPES = {"consumable", "material"}
+    DEFAULT_SLOT = {"weapon": "main_hand", "armor": "body", "accessory": "trinket"}
+
     def __init__(self):
         self.database_url = os.getenv("DATABASE_URL")
         if self.database_url and "sslmode" not in self.database_url:
@@ -79,13 +85,16 @@ class Database:
         return self._with_conn(fn, commit=commit)
 
     def init_tables(self):
-        # Runtime is migration-free. Schema is applied at deploy time by api/migrate.py.
         if not self.database_url:
             logger.warning("DATABASE_URL not set — running without DB.")
             return
         row = self.execute_query("SELECT 1", fetch="one")
         if row is None:
             logger.warning("DB not reachable at boot.")
+
+    @staticmethod
+    def backpack_capacity(level):
+        return 5 + int(level) * 5
 
     # ── Auth / Users ──
     def create_user_with_token(self, user_id, username, password_hash, token, expires_at, metadata=None, telemetry=None):
@@ -236,7 +245,6 @@ class Database:
             "FROM story_characters WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
             (story_id,), fetch="all") or []
 
-    # SECURITY: base_only=True returns ONLY the author's template/intro rows.
     def get_story_messages(self, story_id, limit=50, base_only=True):
         query = ("SELECT id, role, content, message_type, created_at "
                  "FROM story_messages WHERE story_id = %s")
@@ -284,12 +292,17 @@ class Database:
                 "SELECT substr(md5(random()::text || sc.id), 1, 36), %s, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP "
                 "FROM story_characters sc WHERE sc.story_id = %s",
                 (pid, story_id))
-            # SECURITY/UX: seed ONLY the author's base intro rows (playthrough_id='legacy').
             cur.execute(
                 "INSERT INTO story_messages (story_id, playthrough_id, role, content, message_type, metadata, created_at) "
                 "SELECT %s, %s, role, content, message_type, metadata, CURRENT_TIMESTAMP "
                 "FROM story_messages WHERE story_id = %s AND playthrough_id = 'legacy'",
                 (story_id, pid, story_id))
+            # Seed a Level-1 backpack for every character
+            cur.execute(
+                "INSERT INTO playthrough_backpacks (id, playthrough_id, character_id, level, metadata, created_at, updated_at) "
+                "SELECT substr(md5(random()::text || pc.id), 1, 36), %s, pc.id, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+                "FROM playthrough_characters pc WHERE pc.playthrough_id = %s",
+                (pid, pid))
             cur.execute("SELECT * FROM playthroughs WHERE id = %s", (pid,))
             return cur.fetchone()
         return self._with_conn(fn, commit=True)
@@ -343,8 +356,6 @@ class Database:
                         (json.dumps(meta), playthrough_id))
         self._with_conn(fn, commit=True)
 
-    # ROBUST: race-proof upsert via ON CONFLICT on the unique expression index,
-    # with SAVEPOINT fallback if migration 0005 hasn't been applied yet.
     def upsert_playthrough_location(self, playthrough_id, location_name):
         def fn(cur):
             loc_id = str(uuid.uuid4())
@@ -400,8 +411,8 @@ class Database:
             return True
         return self._with_conn(fn, commit=True) is True
 
-    # NEW: live inventory management (ITEM_UPDATE tag)
     def update_playthrough_character_inventory(self, playthrough_id, character_name, item_name, add=True):
+        """Legacy JSONB mirror kept for backward-compatible HUD count."""
         def fn(cur):
             cur.execute(
                 "SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s AND LOWER(character_name) = LOWER(%s) LIMIT 1",
@@ -420,6 +431,236 @@ class Database:
                         (json.dumps(meta), row["id"]))
             return True
         return self._with_conn(fn, commit=True) is True
+
+    # ── Inventory / Equipment / Backpacks (Phase 4) ──
+    def ensure_playthrough_inventory(self, playthrough_id):
+        """Idempotent: creates missing backpacks and converts legacy inventory strings."""
+        def fn(cur):
+            cur.execute("SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s", (playthrough_id,))
+            chars = cur.fetchall() or []
+            for c in chars:
+                cur.execute("SELECT id FROM playthrough_backpacks WHERE character_id = %s", (c["id"],))
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO playthrough_backpacks (id, playthrough_id, character_id, level, metadata, created_at, updated_at) "
+                        "VALUES (%s, %s, %s, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                        (str(uuid.uuid4()), playthrough_id, c["id"]))
+                cur.execute("SELECT id FROM playthrough_items WHERE character_id = %s LIMIT 1", (c["id"],))
+                if not cur.fetchone():
+                    meta = (c["metadata"] if isinstance(c["metadata"], dict) else {}) or {}
+                    inv = meta.get("inventory", [])
+                    if isinstance(inv, list):
+                        for name in inv:
+                            if isinstance(name, str) and name.strip():
+                                cur.execute(
+                                    "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
+                                    "VALUES (%s, %s, %s, %s, 'material', '', 'common', 1, 1, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                                    (str(uuid.uuid4()), playthrough_id, c["id"], name.strip()))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    def get_backpack_for_character(self, character_id):
+        return self.execute_query(
+            "SELECT id, playthrough_id, character_id, level, metadata FROM playthrough_backpacks WHERE character_id = %s",
+            (character_id,), fetch="one")
+
+    def list_playthrough_backpacks(self, playthrough_id):
+        return self.execute_query(
+            "SELECT id, playthrough_id, character_id, level, metadata FROM playthrough_backpacks WHERE playthrough_id = %s",
+            (playthrough_id,), fetch="all") or []
+
+    def backpack_used_capacity(self, character_id):
+        row = self.execute_query(
+            "SELECT COALESCE(SUM(weight * quantity), 0) AS used FROM playthrough_items "
+            "WHERE character_id = %s AND id NOT IN (SELECT item_id FROM playthrough_equipment WHERE character_id = %s)",
+            (character_id, character_id), fetch="one")
+        return int(row["used"]) if row else 0
+
+    def list_playthrough_items(self, playthrough_id):
+        return self.execute_query(
+            "SELECT id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at "
+            "FROM playthrough_items WHERE playthrough_id = %s ORDER BY created_at ASC",
+            (playthrough_id,), fetch="all") or []
+
+    def list_carried_items_for_character(self, character_id):
+        return self.execute_query(
+            "SELECT name, quantity, item_type FROM playthrough_items "
+            "WHERE character_id = %s AND id NOT IN (SELECT item_id FROM playthrough_equipment WHERE character_id = %s) "
+            "ORDER BY created_at ASC",
+            (character_id, character_id), fetch="all") or []
+
+    def list_playthrough_equipment(self, playthrough_id):
+        return self.execute_query(
+            "SELECT pe.id, pe.character_id, pe.item_id, pe.slot, pi.name AS item_name, pi.rarity, pi.item_level "
+            "FROM playthrough_equipment pe JOIN playthrough_items pi ON pi.id = pe.item_id "
+            "WHERE pe.playthrough_id = %s ORDER BY pe.slot ASC",
+            (playthrough_id,), fetch="all") or []
+
+    def list_equipment_for_character(self, character_id):
+        return self.execute_query(
+            "SELECT pe.id, pe.character_id, pe.item_id, pe.slot, pi.name AS item_name, pi.rarity, pi.item_level "
+            "FROM playthrough_equipment pe JOIN playthrough_items pi ON pi.id = pe.item_id "
+            "WHERE pe.character_id = %s ORDER BY pe.slot ASC",
+            (character_id,), fetch="all") or []
+
+    def compute_equipped_bonuses(self, character_id):
+        rows = self.execute_query(
+            "SELECT pi.metadata FROM playthrough_equipment pe JOIN playthrough_items pi ON pi.id = pe.item_id "
+            "WHERE pe.character_id = %s",
+            (character_id,), fetch="all") or []
+        totals = {}
+        for r in rows:
+            meta = (r["metadata"] if isinstance(r["metadata"], dict) else {}) or {}
+            bonuses = meta.get("bonuses", {})
+            if isinstance(bonuses, dict):
+                for k, v in bonuses.items():
+                    try:
+                        totals[k] = totals.get(k, 0) + float(v)
+                    except Exception:
+                        pass
+        return totals
+
+    def set_playthrough_backpack_level(self, playthrough_id, character_id, level):
+        lvl = max(1, min(20, int(level)))
+        def fn(cur):
+            cur.execute("SELECT id FROM playthrough_backpacks WHERE character_id = %s", (character_id,))
+            row = cur.fetchone()
+            if row:
+                cur.execute("UPDATE playthrough_backpacks SET level = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                            (lvl, row["id"]))
+            else:
+                cur.execute(
+                    "INSERT INTO playthrough_backpacks (id, playthrough_id, character_id, level, metadata, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (str(uuid.uuid4()), playthrough_id, character_id, lvl))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    def grant_playthrough_item(self, playthrough_id, character_id, name, attrs=None):
+        attrs = attrs or {}
+        itype = attrs.get("type") if attrs.get("type") in self.VALID_TYPES else "material"
+        slot = attrs.get("slot") if attrs.get("slot") in self.VALID_SLOTS else (self.DEFAULT_SLOT.get(itype, "") if itype in self.DEFAULT_SLOT else "")
+        rarity = attrs.get("rarity") if attrs.get("rarity") in self.VALID_RARITIES else "common"
+        level = max(1, min(99, int(attrs.get("level", 1) or 1)))
+        weight = max(0, min(99, int(attrs.get("weight", 1) if attrs.get("weight") is not None else 1)))
+        bonuses = attrs.get("bonuses") if isinstance(attrs.get("bonuses"), dict) else {}
+        stackable = itype in self.STACKABLE_TYPES
+
+        def fn(cur):
+            cur.execute("SELECT level FROM playthrough_backpacks WHERE character_id = %s", (character_id,))
+            bp = cur.fetchone()
+            if not bp:
+                cur.execute(
+                    "INSERT INTO playthrough_backpacks (id, playthrough_id, character_id, level, metadata, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (str(uuid.uuid4()), playthrough_id, character_id))
+                bp_level = 1
+            else:
+                bp_level = bp["level"]
+            cap = self.backpack_capacity(bp_level)
+            cur.execute(
+                "SELECT COALESCE(SUM(weight * quantity), 0) AS used FROM playthrough_items "
+                "WHERE character_id = %s AND id NOT IN (SELECT item_id FROM playthrough_equipment WHERE character_id = %s)",
+                (character_id, character_id))
+            used = int(cur.fetchone()["used"])
+            if used + weight > cap:
+                return {"ok": False, "reason": "backpack_full"}
+
+            if stackable:
+                cur.execute(
+                    "SELECT id, quantity FROM playthrough_items WHERE character_id = %s AND LOWER(name) = LOWER(%s) AND item_type = %s LIMIT 1",
+                    (character_id, name, itype))
+                row = cur.fetchone()
+                if row:
+                    cur.execute("UPDATE playthrough_items SET quantity = LEAST(99, quantity + 1), updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+                    return {"ok": True}
+
+            meta = {"bonuses": bonuses, "description": ""} if bonuses else {"description": ""}
+            cur.execute(
+                "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (str(uuid.uuid4()), playthrough_id, character_id, name, itype, slot, rarity, level, weight, json.dumps(meta)))
+            return {"ok": True}
+        return self._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
+
+    def consume_playthrough_item(self, playthrough_id, character_id, name):
+        def fn(cur):
+            cur.execute(
+                "SELECT id, quantity FROM playthrough_items WHERE character_id = %s AND LOWER(name) = LOWER(%s) ORDER BY created_at ASC LIMIT 1",
+                (character_id, name))
+            row = cur.fetchone()
+            if not row: return False
+            cur.execute("DELETE FROM playthrough_equipment WHERE item_id = %s", (row["id"],))
+            if int(row["quantity"]) <= 1:
+                cur.execute("DELETE FROM playthrough_items WHERE id = %s", (row["id"],))
+            else:
+                cur.execute("UPDATE playthrough_items SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    def equip_item(self, playthrough_id, character_id, item_id):
+        def fn(cur):
+            cur.execute("SELECT * FROM playthrough_items WHERE id = %s AND playthrough_id = %s", (item_id, playthrough_id))
+            item = cur.fetchone()
+            if not item: return {"ok": False, "reason": "not_found"}
+            if item["character_id"] != character_id: return {"ok": False, "reason": "not_owner"}
+            slot = item["slot"]
+            if not slot: return {"ok": False, "reason": "not_equippable"}
+
+            cur.execute("SELECT level FROM playthrough_backpacks WHERE character_id = %s", (character_id,))
+            bp = cur.fetchone()
+            cap = self.backpack_capacity(bp["level"]) if bp else 10
+            cur.execute(
+                "SELECT COALESCE(SUM(weight * quantity), 0) AS used FROM playthrough_items "
+                "WHERE character_id = %s AND id NOT IN (SELECT item_id FROM playthrough_equipment WHERE character_id = %s)",
+                (character_id, character_id))
+            used = int(cur.fetchone()["used"])
+
+            cur.execute("SELECT item_id FROM playthrough_equipment WHERE character_id = %s AND slot = %s", (character_id, slot))
+            old = cur.fetchone()
+            old_weight = 0
+            if old:
+                cur.execute("SELECT weight FROM playthrough_items WHERE id = %s", (old["item_id"],))
+                ow = cur.fetchone()
+                old_weight = int(ow["weight"]) if ow else 0
+
+            # Equipping frees item weight; old equipped returns to pack
+            if used - int(item["weight"]) + old_weight > cap:
+                return {"ok": False, "reason": "backpack_full"}
+
+            if old:
+                cur.execute("DELETE FROM playthrough_equipment WHERE id = %s", (old["id"],))
+            cur.execute(
+                "INSERT INTO playthrough_equipment (id, playthrough_id, character_id, item_id, slot, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+                (str(uuid.uuid4()), playthrough_id, character_id, item_id, slot))
+            return {"ok": True}
+        return self._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
+
+    def unequip_item(self, playthrough_id, character_id, item_id):
+        def fn(cur):
+            cur.execute("SELECT * FROM playthrough_items WHERE id = %s AND playthrough_id = %s", (item_id, playthrough_id))
+            item = cur.fetchone()
+            if not item: return {"ok": False, "reason": "not_found"}
+            if item["character_id"] != character_id: return {"ok": False, "reason": "not_owner"}
+            cur.execute("SELECT id FROM playthrough_equipment WHERE item_id = %s AND character_id = %s", (item_id, character_id))
+            eq = cur.fetchone()
+            if not eq: return {"ok": False, "reason": "not_equipped"}
+
+            cur.execute("SELECT level FROM playthrough_backpacks WHERE character_id = %s", (character_id,))
+            bp = cur.fetchone()
+            cap = self.backpack_capacity(bp["level"]) if bp else 10
+            cur.execute(
+                "SELECT COALESCE(SUM(weight * quantity), 0) AS used FROM playthrough_items "
+                "WHERE character_id = %s AND id NOT IN (SELECT item_id FROM playthrough_equipment WHERE character_id = %s)",
+                (character_id, character_id))
+            used = int(cur.fetchone()["used"])
+            if used + int(item["weight"]) > cap:
+                return {"ok": False, "reason": "backpack_full"}
+
+            cur.execute("DELETE FROM playthrough_equipment WHERE id = %s", (eq["id"],))
+            return {"ok": True}
+        return self._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
 
     # Legacy story-scoped state (kept for backward compat)
     def update_story_time(self, story_id, day, time_of_day):

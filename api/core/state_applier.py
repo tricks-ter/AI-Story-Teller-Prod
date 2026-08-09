@@ -12,8 +12,10 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-def apply_state_updates(playthrough_id: str, updates: list) -> list:
+def apply_state_updates(playthrough_id: str, updates: list) -> dict:
+    """Returns {"applied": [...], "rejected": [...]}."""
     applied = []
+    rejected = []
     for update in updates:
         try:
             utype = update.get("type")
@@ -48,12 +50,41 @@ def apply_state_updates(playthrough_id: str, updates: list) -> list:
                 applied.append(update)
 
             elif utype == "ITEM_UPDATE":
-                if db.update_playthrough_character_inventory(
-                        playthrough_id, update["character"], update["item"], bool(update.get("add", True))):
+                char_id = _resolve_character_id(playthrough_id, update["character"])
+                if not char_id:
+                    rejected.append({**update, "reason": "character_not_found"})
+                    continue
+                if update.get("add", True):
+                    res = db.grant_playthrough_item(playthrough_id, char_id, update["item"], update.get("attrs") or {})
+                    if res.get("ok"):
+                        applied.append(update)
+                    else:
+                        rejected.append({**update, "reason": res.get("reason", "rejected")})
+                else:
+                    if db.consume_playthrough_item(playthrough_id, char_id, update["item"]):
+                        applied.append(update)
+                    else:
+                        rejected.append({**update, "reason": "item_not_found"})
+
+            elif utype == "BAG_UPDATE":
+                char_id = _resolve_character_id(playthrough_id, update["character"])
+                if not char_id:
+                    rejected.append({**update, "reason": "character_not_found"})
+                elif db.set_playthrough_backpack_level(playthrough_id, char_id, update["level"]):
                     applied.append(update)
+                else:
+                    rejected.append({**update, "reason": "backpack_error"})
 
         except Exception as e:
             logger.error(f"Failed to apply state update {update}: {e}")
+            rejected.append({**update, "reason": "internal_error"})
             continue
 
-    return applied
+    return {"applied": applied, "rejected": rejected}
+
+def _resolve_character_id(playthrough_id: str, character_name: str):
+    chars = db.get_playthrough_characters(playthrough_id)
+    for c in chars:
+        if c["character_name"].lower() == character_name.lower():
+            return c["id"]
+    return None

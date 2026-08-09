@@ -33,8 +33,13 @@ You may use hidden state tags on their own line to update world state:
   [STAT_UPDATE: CharacterName.StatName = NewValue]
   [STAT_UPDATE: CharacterName.StatName -10]
   [LOCATION_UPDATE: NewLocationName]
-  [ITEM_UPDATE: CharacterName + ItemName]  (add item to inventory)
-  [ITEM_UPDATE: CharacterName - ItemName]  (remove/consume item)
+  [ITEM_UPDATE: CharacterName + ItemName | type=weapon, slot=main_hand, rarity=rare, level=4, weight=3, bonus.Health=10]
+  [ITEM_UPDATE: CharacterName - ItemName]  (consume/remove; quantity decreases)
+  [BAG_UPDATE: CharacterName level N]  (backpack upgrade; more carry capacity)
+Item types: weapon, armor, accessory, consumable, material, quest.
+Slots: main_hand, off_hand, head, body, ring, amulet, trinket.
+Rarities: common, uncommon, rare, epic, legendary.
+Respect the player's remaining backpack capacity — do not grant loot that won't fit.
 Use tags sparingly, only when the narrative justifies it.
 
 [PLAYER AGENCY RULES - CRITICAL]
@@ -68,8 +73,26 @@ Time of Day: {pt['time_of_day']}
         for c in characters:
             cmeta = c.get("metadata") or {}
             stats = cmeta.get("stats", {})
-            inv = cmeta.get("inventory", [])
-            world += f"- {c['character_name']} ({c['role']}): Background: {c['background']}. Stats: {stats}. Inventory: {inv}\n"
+            world += f"- {c['character_name']} ({c['role']}): Background: {c['background']}. Stats: {stats}\n"
+
+            carried = db.list_carried_items_for_character(c["id"])
+            legacy_inv = cmeta.get("inventory", [])
+            if carried:
+                world += "  Carried: " + ", ".join(
+                    f"{i['name']} ×{i['quantity']}" if i["quantity"] > 1 else i["name"] for i in carried) + "\n"
+            elif isinstance(legacy_inv, list) and legacy_inv:
+                world += "  Carried: " + ", ".join(str(x) for x in legacy_inv) + "\n"
+
+            equipped = db.list_equipment_for_character(c["id"])
+            if equipped:
+                world += "  Equipped: " + ", ".join(
+                    f"{e['item_name']} ({e['slot']}, lv{e['item_level']})" for e in equipped) + "\n"
+
+            bp = db.get_backpack_for_character(c["id"])
+            if bp:
+                used = db.backpack_used_capacity(c["id"])
+                cap = 5 + bp["level"] * 5
+                world += f"  Backpack: Level {bp['level']}, load {used}/{cap}\n"
 
         context = "\n[RECENT STORY CONTEXT]\n"
         for m in messages:

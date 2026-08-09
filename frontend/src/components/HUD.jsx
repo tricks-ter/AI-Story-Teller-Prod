@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Heart, Sparkles, MapPin, Backpack, ChevronDown, ChevronUp } from "lucide-react";
+import { Heart, Sparkles, MapPin, Backpack } from "lucide-react";
+import InventoryPanel from "./InventoryPanel";
 
 export default function HUD({ storyContext }) {
   const [invOpen, setInvOpen] = useState(false);
@@ -23,81 +24,64 @@ export default function HUD({ storyContext }) {
   const manaPct = Math.max(0, Math.min(100, (mana / maxMana) * 100));
 
   return (
-    <div className="bg-gray-800/80 backdrop-blur-sm border-b border-gray-700 px-3 sm:px-4 py-2 flex flex-wrap items-center gap-3 touch-manipulation">
-      {/* Location */}
-      <div className="flex items-center gap-1.5 text-xs sm:text-sm text-blue-300 min-w-[100px]">
-        <MapPin size={14} className="text-blue-400" />
-        <span className="truncate font-medium">{location}</span>
-      </div>
-
-      {/* Bars Container */}
-      <div className="flex flex-1 min-w-[150px] max-w-[300px] gap-2">
-        {/* HP Bar */}
-        <div className="flex-1 flex flex-col min-w-[60px]">
-          <div className="flex items-center gap-1 text-[10px] sm:text-xs text-red-400 mb-0.5">
-            <Heart size={10} /> <span>HP</span>
-          </div>
-          <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-red-500 transition-all duration-500"
-              style={{ width: `${hpPct}%` }}
-            />
-          </div>
-          <span className="text-[9px] text-gray-500 mt-0.5 text-right">{Math.round(hp)}/{maxHp}</span>
+    <>
+      <div className="bg-gray-800/80 backdrop-blur-sm border-b border-gray-700 px-3 sm:px-4 py-2 flex flex-wrap items-center gap-3 touch-manipulation">
+        {/* Location */}
+        <div className="flex items-center gap-1.5 text-xs sm:text-sm text-blue-300 min-w-[100px]">
+          <MapPin size={14} className="text-blue-400" />
+          <span className="truncate font-medium">{location}</span>
         </div>
 
-        {/* Mana Bar */}
-        <div className="flex-1 flex flex-col min-w-[60px]">
-          <div className="flex items-center gap-1 text-[10px] sm:text-xs text-blue-400 mb-0.5">
-            <Sparkles size={10} /> <span>MP</span>
+        {/* Bars Container */}
+        <div className="flex flex-1 min-w-[150px] max-w-[300px] gap-2">
+          <div className="flex-1 flex flex-col min-w-[60px]">
+            <div className="flex items-center gap-1 text-[10px] sm:text-xs text-red-400 mb-0.5">
+              <Heart size={10} /> <span>HP</span>
+            </div>
+            <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+              <div className="h-full bg-red-500 transition-all duration-500" style={{ width: `${hpPct}%` }} />
+            </div>
+            <span className="text-[9px] text-gray-500 mt-0.5 text-right">{Math.round(hp)}/{maxHp}</span>
           </div>
-          <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-500 transition-all duration-500"
-              style={{ width: `${manaPct}%` }}
-            />
+
+          <div className="flex-1 flex flex-col min-w-[60px]">
+            <div className="flex items-center gap-1 text-[10px] sm:text-xs text-blue-400 mb-0.5">
+              <Sparkles size={10} /> <span>MP</span>
+            </div>
+            <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+              <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${manaPct}%` }} />
+            </div>
+            <span className="text-[9px] text-gray-500 mt-0.5 text-right">{Math.round(mana)}/{maxMana}</span>
           </div>
-          <span className="text-[9px] text-gray-500 mt-0.5 text-right">{Math.round(mana)}/{maxMana}</span>
         </div>
+
+        {/* Stat Chips */}
+        <div className="hidden sm:flex items-center gap-1.5">
+          {Object.entries(stats).filter(([k]) => !["Health", "MaxHealth", "Mana", "MaxMana"].includes(k)).slice(0, 2).map(([k, v]) => (
+            <span key={k} className="px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded text-[10px] font-medium border border-gray-600">
+              {k}: {v}
+            </span>
+          ))}
+        </div>
+
+        {/* Backpack (44px tap target) */}
+        <button
+          onClick={() => setInvOpen(true)}
+          className="flex items-center gap-1 text-[10px] sm:text-xs text-amber-400 min-h-[44px] min-w-[44px] justify-center rounded-xl hover:bg-gray-700/50 touch-manipulation active:scale-95"
+          title="Open backpack"
+        >
+          <Backpack size={14} />
+          <span>{inventory.length}</span>
+        </button>
       </div>
 
-      {/* Stat Chips */}
-      <div className="hidden sm:flex items-center gap-1.5">
-        {Object.entries(stats).filter(([k]) => !["Health", "MaxHealth", "Mana", "MaxMana"].includes(k)).slice(0, 2).map(([k, v]) => (
-          <span key={k} className="px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded text-[10px] font-medium border border-gray-600">
-            {k}: {v}
-          </span>
-        ))}
-      </div>
-
-      {/* Inventory Toggle (44px tap target) */}
-      <button
-        onClick={() => setInvOpen(o => !o)}
-        className="flex items-center gap-1 text-[10px] sm:text-xs text-amber-400 min-h-[44px] min-w-[44px] justify-center rounded-xl hover:bg-gray-700/50 touch-manipulation active:scale-95"
-        title="Inventory"
-      >
-        <Backpack size={14} />
-        <span>{inventory.length}</span>
-        {invOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-      </button>
-
-      {/* Expandable Inventory Panel */}
       {invOpen && (
-        <div className="w-full order-last bg-gray-900/90 border border-gray-700 rounded-xl p-3 animate-fade-in">
-          <h4 className="text-[10px] uppercase text-gray-500 font-bold mb-2">Inventory</h4>
-          {inventory.length === 0 ? (
-            <p className="text-xs text-gray-600">Empty — adventure to find items.</p>
-          ) : (
-            <ul className="flex flex-wrap gap-1.5">
-              {inventory.map((it, i) => (
-                <li key={`${it}-${i}`} className="px-2 py-1 bg-amber-500/10 text-amber-300 border border-amber-500/20 rounded-lg text-[11px]">
-                  {it}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <InventoryPanel
+          playthroughId={storyContext.playthrough_id}
+          characters={storyContext.characters}
+          onClose={() => setInvOpen(false)}
+        />
       )}
-    </div>
+    </>
   );
 }

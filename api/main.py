@@ -30,11 +30,21 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="5.1.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="6.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
 DEFAULT_MODEL = "glm-4.7-flash"
+
+REASON_TEXT = {
+    "backpack_full": "Backpack is full — free up space first.",
+    "not_found": "Item not found.",
+    "not_owner": "That item isn't yours.",
+    "not_equippable": "That item can't be equipped.",
+    "not_equipped": "That item isn't equipped.",
+    "character_not_found": "Character not found.",
+    "item_not_found": "Item not found.",
+}
 
 class MessageItem(BaseModel):
     role: str
@@ -72,6 +82,10 @@ class AuthRequest(BaseModel):
     remember_me: bool = False
     client_telemetry: Optional[dict] = None
 
+class ItemActionRequest(BaseModel):
+    item_id: str
+    character_id: Optional[str] = None
+
 router = APIRouter(prefix="/api")
 
 def get_auth_user(raw: Request) -> Optional[dict]:
@@ -95,6 +109,13 @@ def ensure_playthrough(story_id: str, user: dict):
     pt = db.get_active_playthrough(story_id, user["id"])
     if not pt:
         pt = db.create_playthrough(story_id, user["id"])
+    return pt
+
+def require_own_playthrough(playthrough_id: str, user: dict):
+    pt = db.get_playthrough(playthrough_id)
+    if not pt: raise HTTPException(status_code=404, detail="Playthrough not found")
+    if pt["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Not your playthrough")
     return pt
 
 @router.get("/health")
@@ -153,11 +174,57 @@ def list_playthroughs(raw: Request):
 @router.get("/playthroughs/{playthrough_id}/messages")
 def get_playthrough_messages(playthrough_id: str, raw: Request, limit: int = 100):
     user = require_user(raw)
-    pt = db.get_playthrough(playthrough_id)
-    if not pt: raise HTTPException(status_code=404, detail="Playthrough not found")
-    if pt["user_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Not your playthrough")
+    require_own_playthrough(playthrough_id, user)
     return db.get_playthrough_messages(playthrough_id, limit=min(max(int(limit), 1), 200))
+
+@router.get("/playthroughs/{playthrough_id}/inventory")
+def get_inventory(playthrough_id: str, raw: Request):
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    db.ensure_playthrough_inventory(playthrough_id)
+    items = db.list_playthrough_items(playthrough_id)
+    equipment = db.list_playthrough_equipment(playthrough_id)
+    equipped_ids = {e["item_id"] for e in equipment}
+    for it in items:
+        it["equipped"] = it["id"] in equipped_ids
+    backpacks = []
+    bonuses = {}
+    for bp in db.list_playthrough_backpacks(playthrough_id):
+        cap = db.backpack_capacity(bp["level"])
+        used = db.backpack_used_capacity(bp["character_id"])
+        backpacks.append({**bp, "capacity": cap, "used": used})
+        bonuses[bp["character_id"]] = db.compute_equipped_bonuses(bp["character_id"])
+    return {"items": items, "equipment": equipment, "backpacks": backpacks, "bonuses": bonuses}
+
+@router.post("/playthroughs/{playthrough_id}/equip")
+def equip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    char_id = req.character_id
+    if not char_id:
+        chars = db.get_playthrough_characters(playthrough_id)
+        player = next((c for c in chars if c["is_player"]), None)
+        char_id = (player or (chars[0] if chars else None))["id"] if chars else None
+    if not char_id: raise HTTPException(status_code=400, detail="No character found")
+    res = db.equip_item(playthrough_id, char_id, req.item_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not equip item."))
+    return {"status": "equipped"}
+
+@router.post("/playthroughs/{playthrough_id}/unequip")
+def unequip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    char_id = req.character_id
+    if not char_id:
+        chars = db.get_playthrough_characters(playthrough_id)
+        player = next((c for c in chars if c["is_player"]), None)
+        char_id = (player or (chars[0] if chars else None))["id"] if chars else None
+    if not char_id: raise HTTPException(status_code=400, detail="No character found")
+    res = db.unequip_item(playthrough_id, char_id, req.item_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not unequip item."))
+    return {"status": "unequipped"}
 
 @router.get("/stories/{story_id}")
 def get_story_detail(story_id: str, raw: Request):
@@ -166,8 +233,6 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     return {"story": story, "characters": db.get_story_characters(story_id)}
 
-# SECURITY FIX: base_only=True by default — returns ONLY the author's template/intro
-# rows, never other players' private playthrough conversations.
 @router.get("/stories/{story_id}/messages")
 def get_story_messages(story_id: str, raw: Request, limit: int = 50, base_only: bool = True):
     user = require_user(raw)
@@ -181,6 +246,7 @@ def play_story(story_id: str, raw: Request):
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     pt = ensure_playthrough(story_id, user)
+    db.ensure_playthrough_inventory(pt["id"])
     return {
         "playthrough": pt,
         "story": story,
@@ -264,14 +330,16 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
             return
 
         clean_text, state_updates = resolve_state(full_content)
-        applied = apply_state_updates(pid, state_updates)
+        result = apply_state_updates(pid, state_updates)
+        applied = result["applied"]
+        rejected = result["rejected"]
 
         meta = {"model": request.model, "temperature": request.temperature, "chars": len(clean_text)}
         db.add_playthrough_message(story_id, pid, "assistant", clean_text, msg_type="narration",
                                    metadata=meta, telemetry=telemetry)
 
         fresh = db.get_playthrough(pid)
-        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': applied, 'day': fresh['current_day'], 'time_of_day': fresh['time_of_day']})}\n\n"
+        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': applied, 'rejected': rejected, 'day': fresh['current_day'], 'time_of_day': fresh['time_of_day']})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
