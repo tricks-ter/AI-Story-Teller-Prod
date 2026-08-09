@@ -174,11 +174,15 @@ export default function App() {
 
     if (isStory) {
       cancel = streamStory(storyContext.id, msg, snap, (event) => {
-        if (event.type === "thinking") {
+        if (event.type === "status") {
+          setStatusText(event.message ?? "");
+        } else if (event.type === "thinking") {
           assistantThinking += event.content;
+          setStatusText("");
           setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, narrative: true, timestamp: new Date().toISOString() }));
         } else if (event.type === "content") {
           assistantContent += event.content;
+          setStatusText("");
           setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, narrative: true, timestamp: new Date().toISOString() }));
         } else if (event.type === "state_update") {
           const cleanContent = event.clean_content || assistantContent;

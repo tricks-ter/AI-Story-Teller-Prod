@@ -185,6 +185,11 @@ class Database:
             (session_id, role, content, uid, json.dumps(merged)),
             fetch="none", commit=True)
 
+    def get_last_session_message(self, session_id):
+        return self.execute_query(
+            "SELECT role, content, created_at FROM chat_messages WHERE session_id = %s ORDER BY id DESC LIMIT 1",
+            (session_id,), fetch="one")
+
     # ── Stories (templates) ──
     def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None, telemetry=None):
         if not self.database_url: return
@@ -297,7 +302,6 @@ class Database:
                 "SELECT %s, %s, role, content, message_type, metadata, CURRENT_TIMESTAMP "
                 "FROM story_messages WHERE story_id = %s AND playthrough_id = 'legacy'",
                 (story_id, pid, story_id))
-            # Seed a Level-1 backpack for every character
             cur.execute(
                 "INSERT INTO playthrough_backpacks (id, playthrough_id, character_id, level, metadata, created_at, updated_at) "
                 "SELECT substr(md5(random()::text || pc.id), 1, 36), %s, pc.id, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
@@ -318,6 +322,11 @@ class Database:
             "SELECT id, role, content, message_type, created_at "
             "FROM story_messages WHERE playthrough_id = %s ORDER BY id ASC LIMIT %s",
             (playthrough_id, int(limit)), fetch="all") or []
+
+    def get_last_playthrough_message(self, playthrough_id):
+        return self.execute_query(
+            "SELECT role, content, created_at FROM story_messages WHERE playthrough_id = %s ORDER BY id DESC LIMIT 1",
+            (playthrough_id,), fetch="one")
 
     def add_playthrough_message(self, story_id, playthrough_id, role, content, msg_type="narration", metadata=None, telemetry=None):
         if not self.database_url: return
@@ -412,7 +421,6 @@ class Database:
         return self._with_conn(fn, commit=True) is True
 
     def update_playthrough_character_inventory(self, playthrough_id, character_name, item_name, add=True):
-        """Legacy JSONB mirror kept for backward-compatible HUD count."""
         def fn(cur):
             cur.execute(
                 "SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s AND LOWER(character_name) = LOWER(%s) LIMIT 1",
@@ -434,7 +442,6 @@ class Database:
 
     # ── Inventory / Equipment / Backpacks (Phase 4) ──
     def ensure_playthrough_inventory(self, playthrough_id):
-        """Idempotent: creates missing backpacks and converts legacy inventory strings."""
         def fn(cur):
             cur.execute("SELECT id, metadata FROM playthrough_characters WHERE playthrough_id = %s", (playthrough_id,))
             chars = cur.fetchall() or []
@@ -624,7 +631,6 @@ class Database:
                 ow = cur.fetchone()
                 old_weight = int(ow["weight"]) if ow else 0
 
-            # Equipping frees item weight; old equipped returns to pack
             if used - int(item["weight"]) + old_weight > cap:
                 return {"ok": False, "reason": "backpack_full"}
 

@@ -8,6 +8,7 @@ if BASE_DIR not in sys.path:
 import json, logging, uuid
 from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,7 @@ from core.auth import hash_password, verify_password, make_token, get_user_by_to
 from core.prompt_assembler import PromptAssembler
 from core.state_resolver import resolve_state
 from core.state_applier import apply_state_updates
+from core.resilience import call_with_retry, UpstreamRateLimited, extract_status, extract_retry_after, friendly_upstream
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="6.0.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="6.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -118,6 +120,18 @@ def require_own_playthrough(playthrough_id: str, user: dict):
         raise HTTPException(status_code=403, detail="Not your playthrough")
     return pt
 
+def _recent_duplicate(last_row, content, window=90):
+    """Idempotency guard: True if the same user message was stored within `window` seconds."""
+    if not last_row or last_row.get("role") != "user" or last_row.get("content") != content:
+        return False
+    ts = last_row.get("created_at")
+    if not ts: return False
+    try:
+        if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() <= window
+    except Exception:
+        return False
+
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
@@ -129,7 +143,6 @@ def signup(req: AuthRequest):
     if db.get_user_by_username(username): raise HTTPException(status_code=409, detail="Username already taken")
     user_id = str(uuid.uuid4())
     token, expires = make_token(user_id, req.remember_me)
-    from datetime import datetime, timezone
     initial_meta = {
         "preferences": {},
         "energy_credits": 0,
@@ -290,7 +303,9 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
     pid = pt["id"]
     telemetry = request.client_telemetry
 
-    db.add_playthrough_message(story_id, pid, "user", request.user_action, msg_type="action", telemetry=telemetry)
+    # Idempotency guard: safe automatic retries never duplicate the action
+    if not _recent_duplicate(db.get_last_playthrough_message(pid), request.user_action):
+        db.add_playthrough_message(story_id, pid, "user", request.user_action, msg_type="action", telemetry=telemetry)
 
     assembler = PromptAssembler(pid)
     system_prompt = assembler.assemble_full_prompt(request.user_action)
@@ -310,11 +325,13 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": request.user_action}
             ]
-            response = client.chat.completions.create(
-                model=request.model, messages=messages, stream=True,
-                max_tokens=request.max_tokens, temperature=request.temperature,
-                thinking={"type": "enabled" if request.enable_thinking else "disabled"}
-            )
+            response = call_with_retry(
+                lambda: client.chat.completions.create(
+                    model=request.model, messages=messages, stream=True,
+                    max_tokens=request.max_tokens, temperature=request.temperature,
+                    thinking={"type": "enabled" if request.enable_thinking else "disabled"}
+                ),
+                max_attempts=3, label="story")
             for chunk in response:
                 delta = chunk.choices[0].delta
                 reasoning = getattr(delta, "reasoning_content", None)
@@ -324,8 +341,13 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
                 if content:
                     full_content += content
                     yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+        except UpstreamRateLimited as e:
+            yield f"data: {json.dumps({'type': 'error', 'code': 429, 'retry_after': e.retry_after, 'message': friendly_upstream(429, str(e))})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            status = extract_status(e)
+            yield f"data: {json.dumps({'type': 'error', 'code': status, 'retry_after': extract_retry_after(e), 'message': friendly_upstream(status, str(e))})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 
@@ -363,9 +385,10 @@ async def chat_stream(request: ChatRequest, raw: Request):
     last_msg = request.messages[-1]
     if last_msg.role == "user":
         db.ensure_session(request.session_id, last_msg.content[:50] if len(last_msg.content) > 50 else "New Chat", user_id=uid)
-        db.add_message(request.session_id, "user", last_msg.content,
-                       metadata={**base_meta, "role": "user"},
-                       user_id=uid, telemetry=telemetry)
+        if not _recent_duplicate(db.get_last_session_message(request.session_id), last_msg.content):
+            db.add_message(request.session_id, "user", last_msg.content,
+                           metadata={**base_meta, "role": "user"},
+                           user_id=uid, telemetry=telemetry)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None
     history = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -379,11 +402,13 @@ async def chat_stream(request: ChatRequest, raw: Request):
             return
 
         try:
-            response = client.chat.completions.create(
-                model=request.model, messages=history, stream=True,
-                max_tokens=request.max_tokens, temperature=request.temperature,
-                thinking={"type": "enabled" if request.enable_thinking else "disabled"}
-            )
+            response = call_with_retry(
+                lambda: client.chat.completions.create(
+                    model=request.model, messages=history, stream=True,
+                    max_tokens=request.max_tokens, temperature=request.temperature,
+                    thinking={"type": "enabled" if request.enable_thinking else "disabled"}
+                ),
+                max_attempts=3, label="chat")
             for chunk in response:
                 delta = chunk.choices[0].delta
                 reasoning = getattr(delta, "reasoning_content", None)
@@ -392,8 +417,11 @@ async def chat_stream(request: ChatRequest, raw: Request):
                 if content:
                     full_content += content
                     yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+        except UpstreamRateLimited as e:
+            yield f"data: {json.dumps({'type': 'error', 'code': 429, 'retry_after': e.retry_after, 'message': friendly_upstream(429, str(e))})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            status = extract_status(e)
+            yield f"data: {json.dumps({'type': 'error', 'code': status, 'retry_after': extract_retry_after(e), 'message': friendly_upstream(status, str(e))})}\n\n"
 
         if full_content:
             db.add_message(request.session_id, "assistant", full_content,
