@@ -36,8 +36,7 @@ Target: mobile-first AI-native readers & writers; emerging markets (light model 
 - Migrations: DEPLOY-TIME ONLY. migrations/*.sql applied by api/migrate.py via
   .github/workflows/migrate.yml (GitHub secret DATABASE_URL; push main + dispatch).
   Runtime init_tables() = connection check ONLY. Never add runtime migrations.
-- Alt hosts: render.yaml, start.sh. CI tests: .github/workflows/tests.yml (pytest api/tests -q).
-
+- Alt hosts: render.yaml, start.sh. CI tests: .github/workflows/tests.yml (pytest api/tests -q)....
 ## 3. REPOSITORY MAP
     migrations/0001_core_schema.sql   users, auth_tokens, chat_*, stories, story_characters, story_messages, story_notes
     migrations/0002_playthroughs.sql  playthroughs, playthrough_characters; story_messages.playthrough_id (default 'legacy')
