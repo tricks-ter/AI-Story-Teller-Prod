@@ -32,15 +32,23 @@ You may use hidden state tags on their own line to update world state:
   [TIME_UPDATE: Day X, TimeOfDay]  (Morning/Afternoon/Evening/Night)
   [STAT_UPDATE: CharacterName.StatName = NewValue]
   [STAT_UPDATE: CharacterName.StatName -10]
-  [LOCATION_UPDATE: NewLocationName]
-  [ITEM_UPDATE: CharacterName + ItemName | type=weapon, slot=main_hand, rarity=rare, level=4, weight=3, bonus.Health=10]
+  [LOCATION_UPDATE: LocationName]
+  [ITEM_UPDATE: CharacterName + ItemName | type=weapon, slot=main_hand, rarity=rare, level=4, weight=3, bonus.Health=10, desc=Short description]
   [ITEM_UPDATE: CharacterName - ItemName]  (consume/remove; quantity decreases)
+  [ABILITY_UPDATE: CharacterName + Ability Name | desc=What it does and how it feels]
   [BAG_UPDATE: CharacterName level N]  (backpack upgrade; more carry capacity)
 Item types: weapon, armor, accessory, consumable, material, quest.
 Slots: main_hand, off_hand, head, body, ring, amulet, trinket.
 Rarities: common, uncommon, rare, epic, legendary.
-Respect the player's remaining backpack capacity — do not grant loot that won't fit.
-Use tags sparingly, only when the narrative justifies it.
+
+[STATE TAG RULES - CRITICAL]
+- Physical objects the player can carry, wear, use or trade -> ITEM_UPDATE.
+- Powers, skills, spells, techniques, soul rings, blessings, knowledge -> ABILITY_UPDATE. NEVER store abilities or absorbed powers in the backpack.
+- ALWAYS emit [LOCATION_UPDATE: Name] when the scene's location is first described, whenever the party moves to a new place, and whenever the player asks where they are.
+- If no Current Location is set in the world state yet, infer the starting location from the premise and emit [LOCATION_UPDATE] in your very first response.
+- Always include a short desc= for new items and abilities so the player understands them.
+- Respect the player's remaining backpack capacity — do not grant loot that won't fit.
+- Use tags only when the narrative justifies it.
 
 [PLAYER AGENCY RULES - CRITICAL]
 - NEVER perform the player's chosen action for them, and NEVER describe its outcome.
@@ -74,6 +82,12 @@ Time of Day: {pt['time_of_day']}
             cmeta = c.get("metadata") or {}
             stats = cmeta.get("stats", {})
             world += f"- {c['character_name']} ({c['role']}): Background: {c['background']}. Stats: {stats}\n"
+
+            abilities = cmeta.get("abilities", [])
+            if isinstance(abilities, list) and abilities:
+                world += "  Abilities: " + ", ".join(
+                    f"{a.get('name', '?')}" + (f" ({a.get('description')})" if a.get('description') else "")
+                    for a in abilities if isinstance(a, dict)) + "\n"
 
             carried = db.list_carried_items_for_character(c["id"])
             legacy_inv = cmeta.get("inventory", [])

@@ -26,6 +26,10 @@ class Database:
     VALID_RARITIES = {"common", "uncommon", "rare", "epic", "legendary"}
     STACKABLE_TYPES = {"consumable", "material"}
     DEFAULT_SLOT = {"weapon": "main_hand", "armor": "body", "accessory": "trinket"}
+    DEFAULT_ITEM_DESCRIPTIONS = {
+        "Starter Item": "A humble keepsake from home — sentimental value only, but it steadies your resolve.",
+        "Adventurer's Kit": "A worn satchel with rope, a waterskin, dried rations and a flint — the basics any traveler needs.",
+    }
 
     def __init__(self):
         self.database_url = os.getenv("DATABASE_URL")
@@ -420,6 +424,30 @@ class Database:
             return True
         return self._with_conn(fn, commit=True) is True
 
+    def update_playthrough_character_ability(self, playthrough_id, character_id, ability_name, add=True, description=""):
+        def fn(cur):
+            cur.execute(
+                "SELECT id, metadata FROM playthrough_characters WHERE id = %s AND playthrough_id = %s",
+                (character_id, playthrough_id))
+            row = cur.fetchone()
+            if not row: return False
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            abilities = meta.get("abilities", [])
+            if not isinstance(abilities, list): abilities = []
+            if add:
+                existing = next((a for a in abilities if isinstance(a, dict) and str(a.get("name", "")).lower() == ability_name.lower()), None)
+                if existing:
+                    if description: existing["description"] = description
+                else:
+                    abilities.append({"name": ability_name, "description": description or ""})
+            else:
+                abilities = [a for a in abilities if not (isinstance(a, dict) and str(a.get("name", "")).lower() == ability_name.lower())]
+            meta["abilities"] = abilities
+            cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
+                        (json.dumps(meta), row["id"]))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
     def update_playthrough_character_inventory(self, playthrough_id, character_name, item_name, add=True):
         def fn(cur):
             cur.execute(
@@ -459,10 +487,17 @@ class Database:
                     if isinstance(inv, list):
                         for name in inv:
                             if isinstance(name, str) and name.strip():
+                                desc = self.DEFAULT_ITEM_DESCRIPTIONS.get(name.strip(), "")
                                 cur.execute(
                                     "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
-                                    "VALUES (%s, %s, %s, %s, 'material', '', 'common', 1, 1, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                                    (str(uuid.uuid4()), playthrough_id, c["id"], name.strip()))
+                                    "VALUES (%s, %s, %s, %s, 'material', '', 'common', 1, 1, 1, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                                    (str(uuid.uuid4()), playthrough_id, c["id"], name.strip(), json.dumps({"description": desc})))
+                # Lazy backfill: attach default descriptions to legacy items that lack one
+                for dname, ddesc in self.DEFAULT_ITEM_DESCRIPTIONS.items():
+                    cur.execute(
+                        "UPDATE playthrough_items SET metadata = COALESCE(metadata, '{}') || %s::jsonb, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE character_id = %s AND LOWER(name) = LOWER(%s) AND COALESCE(metadata->>'description', '') = ''",
+                        (json.dumps({"description": ddesc}), c["id"], dname))
             return True
         return self._with_conn(fn, commit=True) is True
 
@@ -551,6 +586,7 @@ class Database:
         level = max(1, min(99, int(attrs.get("level", 1) or 1)))
         weight = max(0, min(99, int(attrs.get("weight", 1) if attrs.get("weight") is not None else 1)))
         bonuses = attrs.get("bonuses") if isinstance(attrs.get("bonuses"), dict) else {}
+        description = attrs.get("description", "") or self.DEFAULT_ITEM_DESCRIPTIONS.get(name, "")
         stackable = itype in self.STACKABLE_TYPES
 
         def fn(cur):
@@ -582,7 +618,8 @@ class Database:
                     cur.execute("UPDATE playthrough_items SET quantity = LEAST(99, quantity + 1), updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
                     return {"ok": True}
 
-            meta = {"bonuses": bonuses, "description": ""} if bonuses else {"description": ""}
+            meta = {"description": description}
+            if bonuses: meta["bonuses"] = bonuses
             cur.execute(
                 "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",

@@ -232,6 +232,25 @@ export default function App() {
                   meta.inventory = inv;
                   newChars[charIdx] = { ...c, metadata: meta };
                 }
+              } else if (up.type === "ABILITY_UPDATE") {
+                const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
+                if (charIdx !== -1) {
+                  const c = newChars[charIdx];
+                  const meta = { ...(c.metadata || {}) };
+                  let ab = Array.isArray(meta.abilities) ? [...meta.abilities] : [];
+                  if (up.add) {
+                    const ex = ab.find(a => a && a.name && a.name.toLowerCase() === (up.ability || "").toLowerCase());
+                    if (ex) {
+                      if (up.description) ex = { ...ex, description: up.description };
+                    } else {
+                      ab.push({ name: up.ability, description: up.description || "" });
+                    }
+                  } else {
+                    ab = ab.filter(a => !(a && a.name && a.name.toLowerCase() === (up.ability || "").toLowerCase()));
+                  }
+                  meta.abilities = ab;
+                  newChars[charIdx] = { ...c, metadata: meta };
+                }
               }
             }
             newContext.characters = newChars;

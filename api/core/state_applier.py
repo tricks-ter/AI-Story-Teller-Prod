@@ -66,6 +66,18 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                     else:
                         rejected.append({**update, "reason": "item_not_found"})
 
+            elif utype == "ABILITY_UPDATE":
+                char_id = _resolve_character_id(playthrough_id, update["character"])
+                if not char_id:
+                    rejected.append({**update, "reason": "character_not_found"})
+                    continue
+                if db.update_playthrough_character_ability(
+                        playthrough_id, char_id, update["ability"],
+                        bool(update.get("add", True)), update.get("description", "")):
+                    applied.append(update)
+                else:
+                    rejected.append({**update, "reason": "character_not_found"})
+
             elif utype == "BAG_UPDATE":
                 char_id = _resolve_character_id(playthrough_id, update["character"])
                 if not char_id:

@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="6.1.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="6.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -121,7 +121,6 @@ def require_own_playthrough(playthrough_id: str, user: dict):
     return pt
 
 def _recent_duplicate(last_row, content, window=90):
-    """Idempotency guard: True if the same user message was stored within `window` seconds."""
     if not last_row or last_row.get("role") != "user" or last_row.get("content") != content:
         return False
     ts = last_row.get("created_at")
@@ -202,12 +201,17 @@ def get_inventory(playthrough_id: str, raw: Request):
         it["equipped"] = it["id"] in equipped_ids
     backpacks = []
     bonuses = {}
+    abilities = {}
     for bp in db.list_playthrough_backpacks(playthrough_id):
         cap = db.backpack_capacity(bp["level"])
         used = db.backpack_used_capacity(bp["character_id"])
         backpacks.append({**bp, "capacity": cap, "used": used})
         bonuses[bp["character_id"]] = db.compute_equipped_bonuses(bp["character_id"])
-    return {"items": items, "equipment": equipment, "backpacks": backpacks, "bonuses": bonuses}
+    for c in db.get_playthrough_characters(playthrough_id):
+        cmeta = c.get("metadata") or {}
+        ab = cmeta.get("abilities", [])
+        abilities[c["id"]] = ab if isinstance(ab, list) else []
+    return {"items": items, "equipment": equipment, "backpacks": backpacks, "bonuses": bonuses, "abilities": abilities}
 
 @router.post("/playthroughs/{playthrough_id}/equip")
 def equip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
@@ -278,7 +282,7 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
     }
     char_meta = {
         "stats": {"Health": 100, "Mana": 50},
-        "inventory": ["Starter Item"]
+        "inventory": ["Adventurer's Kit"]
     }
 
     telemetry = request.client_telemetry
@@ -303,7 +307,6 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
     pid = pt["id"]
     telemetry = request.client_telemetry
 
-    # Idempotency guard: safe automatic retries never duplicate the action
     if not _recent_duplicate(db.get_last_playthrough_message(pid), request.user_action):
         db.add_playthrough_message(story_id, pid, "user", request.user_action, msg_type="action", telemetry=telemetry)
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { X, Backpack, Shield, Sword, Gem, FlaskConical, Package, Scroll } from "lucide-react";
+import { X, Backpack, Shield, Sword, Gem, FlaskConical, Package, Scroll, Sparkles } from "lucide-react";
 import { fetchInventory, equipItem, unequipItem } from "../utils/api";
 
 const RARITY_STYLE = {
@@ -32,6 +32,7 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
   const bp = (data?.backpacks || []).find(b => b.character_id === playerId);
   const carried = (data?.items || []).filter(i => i.character_id === playerId && !i.equipped);
   const equipped = (data?.equipment || []).filter(e => e.character_id === playerId);
+  const abilities = (data?.abilities || {})[playerId] || [];
   const bonuses = (data?.bonuses || {})[playerId] || {};
   const bonusText = Object.entries(bonuses).map(([k, v]) => `+${v} ${k}`).join(", ");
 
@@ -87,6 +88,24 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
 
         <div className="flex-1 overflow-y-auto p-4 space-y-5">
           <section>
+            <h4 className="text-[10px] uppercase tracking-wide text-violet-400 font-bold mb-2 flex items-center gap-1">
+              <Sparkles size={12} /> Abilities
+            </h4>
+            {abilities.length === 0 ? (
+              <p className="text-xs text-gray-600">No abilities learned yet — powers you absorb appear here, not in the backpack.</p>
+            ) : (
+              <ul className="space-y-2">
+                {abilities.map((a, i) => (
+                  <li key={`${a?.name}-${i}`} className="px-3 py-2 rounded-xl border border-violet-500/40 bg-violet-500/10">
+                    <p className="text-xs font-semibold text-violet-300">{a?.name}</p>
+                    {a?.description && <p className="text-[11px] text-gray-400 mt-0.5">{a.description}</p>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section>
             <h4 className="text-[10px] uppercase tracking-wide text-gray-500 font-bold mb-2">Equipped</h4>
             {equipped.length === 0 ? (
               <p className="text-xs text-gray-600">Nothing equipped yet.</p>
@@ -118,14 +137,16 @@ export default function InventoryPanel({ playthroughId, characters, onClose }) {
                 {carried.map(i => {
                   const Icon = TYPE_ICON[i.item_type] || Package;
                   const equippable = !!i.slot;
+                  const desc = i.metadata?.description;
                   return (
-                    <li key={i.id} className={`flex items-center gap-2 px-3 py-2 rounded-xl border bg-gray-800/50 ${RARITY_STYLE[i.rarity] || RARITY_STYLE.common}`}>
-                      <Icon size={14} className="flex-shrink-0" />
+                    <li key={i.id} className={`flex items-start gap-2 px-3 py-2 rounded-xl border bg-gray-800/50 ${RARITY_STYLE[i.rarity] || RARITY_STYLE.common}`}>
+                      <Icon size={14} className="flex-shrink-0 mt-0.5" />
                       <div className="flex-1 min-w-0">
                         <p className="text-xs truncate">{i.name}{i.quantity > 1 ? ` ×${i.quantity}` : ""}</p>
                         <p className="text-[10px] text-gray-500">
                           {i.item_type} · lv{i.item_level} · w{i.weight} · {i.rarity}
                         </p>
+                        {desc && <p className="text-[10px] text-gray-400 mt-0.5">{desc}</p>}
                       </div>
                       {equippable && (
                         <button
