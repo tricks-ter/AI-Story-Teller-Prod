@@ -8,6 +8,7 @@ import LandingPage from "./components/LandingPage";
 import StoryCreator from "./components/StoryCreator";
 import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
+import HUD from "./components/HUD";
 import { streamChat, streamStory } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
@@ -93,6 +94,8 @@ export default function App() {
         playthrough_id: pt.id,
         current_day: pt.current_day,
         time_of_day: pt.time_of_day,
+        characters: playData.characters || [],
+        current_location: pt.metadata?.current_location || "Unknown Realm",
       });
 
       const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
@@ -169,11 +172,31 @@ export default function App() {
           const cleanContent = event.clean_content || assistantContent;
           assistantContent = cleanContent;
           setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: cleanContent, narrative: true, timestamp: new Date().toISOString() }));
-          setStoryContext((prev) => ({
-            ...prev,
-            current_day: event.day ?? prev.current_day,
-            time_of_day: event.time_of_day ?? prev.time_of_day,
-          }));
+          setStoryContext((prev) => {
+            let newContext = {
+              ...prev,
+              current_day: event.day ?? prev.current_day,
+              time_of_day: event.time_of_day ?? prev.time_of_day,
+            };
+            let newChars = [...(prev.characters || [])];
+            for (const up of event.updates || []) {
+              if (up.type === "LOCATION_UPDATE") {
+                newContext.current_location = up.location;
+              } else if (up.type === "STAT_UPDATE") {
+                const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
+                if (charIdx !== -1) {
+                  const c = newChars[charIdx];
+                  const meta = { ...(c.metadata || {}) };
+                  const stats = { ...(meta.stats || {}) };
+                  stats[up.stat] = up.value;
+                  meta.stats = stats;
+                  newChars[charIdx] = { ...c, metadata: meta };
+                }
+              }
+            }
+            newContext.characters = newChars;
+            return newContext;
+          });
         } else if (event.type === "error") {
           setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText("");
         } else if (event.type === "done") {
@@ -251,6 +274,7 @@ export default function App() {
             <button onClick={() => setError(null)} className="p-1.5 text-red-500 hover:text-red-300 touch-manipulation"><X size={14} /></button>
           </div>
         )}
+        {storyContext && <HUD storyContext={storyContext} />}
         <ChatWindow messages={messages} streamingMsg={streamingMsg} isStreaming={isStreaming} statusText={statusText} onSuggestion={handleSuggestion} />
         <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onStop={handleStop} onOpenSettings={() => setSettingsOpen(true)} onToggleThinking={handleToggleThinking} isStreaming={isStreaming} disabled={false} settings={settings} />
       </div>

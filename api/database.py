@@ -79,8 +79,6 @@ class Database:
         return self._with_conn(fn, commit=commit)
 
     def init_tables(self):
-        # Runtime is migration-free. Schema is applied at deploy time by api/migrate.py.
-        # This only validates the connection so we log a clear warning if the DB is down.
         if not self.database_url:
             logger.warning("DATABASE_URL not set — running without DB.")
             return
@@ -332,6 +330,37 @@ class Database:
             cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                         (json.dumps(meta), playthrough_id))
         self._with_conn(fn, commit=True)
+
+    # ADDITIVE: New method for Phase 3 Locations table
+    def upsert_playthrough_location(self, playthrough_id, location_name):
+        def fn(cur):
+            loc_id = str(uuid.uuid4())
+            cur.execute(
+                "SELECT id FROM locations WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s)",
+                (playthrough_id, location_name))
+            row = cur.fetchone()
+            if row:
+                cur.execute("UPDATE locations SET is_discovered = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+            else:
+                cur.execute(
+                    "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, metadata, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (loc_id, playthrough_id, location_name))
+            
+            cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
+            pt_row = cur.fetchone()
+            meta = (pt_row["metadata"] if pt_row and isinstance(pt_row["metadata"], dict) else {}) or {}
+            meta["current_location"] = location_name
+            cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(meta), playthrough_id))
+        self._with_conn(fn, commit=True)
+
+    # ADDITIVE: New method for Phase 3 Locations table
+    def get_playthrough_locations(self, playthrough_id):
+        return self.execute_query(
+            "SELECT id, name, description, is_discovered, metadata, created_at, updated_at "
+            "FROM locations WHERE playthrough_id = %s ORDER BY updated_at DESC",
+            (playthrough_id,), fetch="all") or []
 
     def update_playthrough_character_stat(self, playthrough_id, character_name, stat_name, new_value, max_value=999):
         def fn(cur):

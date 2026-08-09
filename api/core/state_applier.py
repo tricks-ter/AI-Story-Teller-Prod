@@ -43,7 +43,8 @@ def apply_state_updates(playthrough_id: str, updates: list) -> list:
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
-                db.update_playthrough_location(playthrough_id, update["location"])
+                # ADDITIVE: Uses the new upsert method to track locations in the new table
+                db.upsert_playthrough_location(playthrough_id, update["location"])
                 applied.append(update)
 
         except Exception as e:
