@@ -46,8 +46,10 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
-                db.upsert_playthrough_location(playthrough_id, update["location"])
-                applied.append(update)
+                if db.upsert_playthrough_location(playthrough_id, update["location"]):
+                    applied.append(update)
+                else:
+                    rejected.append({**update, "reason": "location_error"})
 
             elif utype == "ITEM_UPDATE":
                 char_id = _resolve_character_id(playthrough_id, update["character"])

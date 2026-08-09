@@ -124,6 +124,10 @@ export default function App() {
       mapped.forEach(m => appendMessage(session.session_id, m));
     } catch (err) {
       console.error("[openStory] error:", err);
+      // Clean exit: never strand the user in story mode with a half-set context
+      setStoryContext(null);
+      setMessages([]);
+      setView("library");
       setError(describeNetworkError(err));
     }
   };
@@ -191,7 +195,7 @@ export default function App() {
 
           if (Array.isArray(event.rejected) && event.rejected.length) {
             const texts = event.rejected.map(r => {
-              const label = r.item || "Item";
+              const label = r.item || r.ability || "Update";
               const why = (r.reason || "rejected").replace(/_/g, " ");
               return `${label} left behind (${why})`;
             });
@@ -239,9 +243,9 @@ export default function App() {
                   const meta = { ...(c.metadata || {}) };
                   let ab = Array.isArray(meta.abilities) ? [...meta.abilities] : [];
                   if (up.add) {
-                    const ex = ab.find(a => a && a.name && a.name.toLowerCase() === (up.ability || "").toLowerCase());
-                    if (ex) {
-                      if (up.description) ex = { ...ex, description: up.description };
+                    const idx = ab.findIndex(a => a && a.name && a.name.toLowerCase() === (up.ability || "").toLowerCase());
+                    if (idx !== -1) {
+                      if (up.description) ab[idx] = { ...ab[idx], description: up.description };
                     } else {
                       ab.push({ name: up.ability, description: up.description || "" });
                     }
@@ -341,7 +345,7 @@ export default function App() {
           </div>
         )}
         {storyContext && <HUD storyContext={storyContext} />}
-        <ChatWindow messages={messages} streamingMsg={streamingMsg} isStreaming={isStreaming} statusText={statusText} onSuggestion={handleSuggestion} />
+        <ChatWindow messages={messages} streamingMsg={streamingMsg} isStreaming={isStreaming} statusText={statusText} onSuggestion={handleSuggestion} isStory={!!storyContext} />
         <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onStop={handleStop} onOpenSettings={() => setSettingsOpen(true)} onToggleThinking={handleToggleThinking} isStreaming={isStreaming} disabled={false} settings={settings} />
       </div>
     </div>

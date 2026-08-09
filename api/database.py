@@ -367,6 +367,7 @@ class Database:
             meta["current_location"] = location
             cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                         (json.dumps(meta), playthrough_id))
+            return True
         self._with_conn(fn, commit=True)
 
     def upsert_playthrough_location(self, playthrough_id, location_name):
@@ -400,7 +401,8 @@ class Database:
             meta["current_location"] = location_name
             cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                         (json.dumps(meta), playthrough_id))
-        self._with_conn(fn, commit=True)
+            return True
+        return self._with_conn(fn, commit=True) is True
 
     def get_playthrough_locations(self, playthrough_id):
         return self.execute_query(
@@ -455,18 +457,26 @@ class Database:
                 (playthrough_id, character_name))
             row = cur.fetchone()
             if not row: return False
-            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
-            inv = meta.get("inventory", [])
-            if not isinstance(inv, list): inv = []
-            if add:
-                if item_name not in inv: inv.append(item_name)
-            else:
-                inv = [i for i in inv if str(i).lower() != str(item_name).lower()]
-            meta["inventory"] = inv
-            cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
-                        (json.dumps(meta), row["id"]))
+            self._sync_inventory_mirror(cur, row["id"], item_name, add)
             return True
         return self._with_conn(fn, commit=True) is True
+
+    def _sync_inventory_mirror(self, cur, character_id, name, add):
+        """Keeps legacy metadata.inventory (HUD count source) in sync with playthrough_items."""
+        cur.execute("SELECT metadata FROM playthrough_characters WHERE id = %s", (character_id,))
+        row = cur.fetchone()
+        if not row: return
+        meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+        inv = meta.get("inventory", [])
+        if not isinstance(inv, list): inv = []
+        present = any(str(i).lower() == str(name).lower() for i in inv)
+        if add and not present:
+            inv.append(name)
+        elif not add and present:
+            inv = [i for i in inv if str(i).lower() != str(name).lower()]
+        meta["inventory"] = inv
+        cur.execute("UPDATE playthrough_characters SET metadata = %s WHERE id = %s",
+                    (json.dumps(meta), character_id))
 
     # ── Inventory / Equipment / Backpacks (Phase 4) ──
     def ensure_playthrough_inventory(self, playthrough_id):
@@ -492,7 +502,6 @@ class Database:
                                     "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
                                     "VALUES (%s, %s, %s, %s, 'material', '', 'common', 1, 1, 1, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                                     (str(uuid.uuid4()), playthrough_id, c["id"], name.strip(), json.dumps({"description": desc})))
-                # Lazy backfill: attach default descriptions to legacy items that lack one
                 for dname, ddesc in self.DEFAULT_ITEM_DESCRIPTIONS.items():
                     cur.execute(
                         "UPDATE playthrough_items SET metadata = COALESCE(metadata, '{}') || %s::jsonb, updated_at = CURRENT_TIMESTAMP "
@@ -616,6 +625,7 @@ class Database:
                 row = cur.fetchone()
                 if row:
                     cur.execute("UPDATE playthrough_items SET quantity = LEAST(99, quantity + 1), updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
+                    self._sync_inventory_mirror(cur, character_id, name, True)
                     return {"ok": True}
 
             meta = {"description": description}
@@ -624,6 +634,7 @@ class Database:
                 "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                 (str(uuid.uuid4()), playthrough_id, character_id, name, itype, slot, rarity, level, weight, json.dumps(meta)))
+            self._sync_inventory_mirror(cur, character_id, name, True)
             return {"ok": True}
         return self._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
 
@@ -637,6 +648,7 @@ class Database:
             cur.execute("DELETE FROM playthrough_equipment WHERE item_id = %s", (row["id"],))
             if int(row["quantity"]) <= 1:
                 cur.execute("DELETE FROM playthrough_items WHERE id = %s", (row["id"],))
+                self._sync_inventory_mirror(cur, character_id, name, False)
             else:
                 cur.execute("UPDATE playthrough_items SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (row["id"],))
             return True
@@ -720,6 +732,7 @@ class Database:
             meta["current_location"] = location
             cur.execute("UPDATE stories SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                         (json.dumps(meta), story_id))
+            return True
         self._with_conn(fn, commit=True)
 
     def update_character_stat(self, story_id, character_name, stat_name, new_value, max_value=100):

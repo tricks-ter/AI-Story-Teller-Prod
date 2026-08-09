@@ -10,6 +10,7 @@ export default function ChatWindow({
   isStreaming,
   statusText,
   onSuggestion,
+  isStory,
 }) {
   const bottomRef = useRef(null);
 
@@ -29,7 +30,26 @@ export default function ChatWindow({
   return (
     <div className="flex-1 overflow-y-auto overscroll-contain">
       {!hasMessages ? (
-        <EmptyState onSuggestion={onSuggestion} />
+        isStory ? (
+          <div className="max-w-3xl mx-auto px-4 py-12 text-center">
+            <p className="text-sm text-gray-400 italic leading-relaxed">
+              The page is blank. The world holds its breath, waiting for your first move.
+            </p>
+            <div className="flex flex-wrap justify-center gap-2 mt-5">
+              {["Look around carefully", "Move forward"].map(s => (
+                <button
+                  key={s}
+                  onClick={() => onSuggestion(s)}
+                  className="px-4 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs min-h-[44px] touch-manipulation active:scale-95"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <EmptyState onSuggestion={onSuggestion} />
+        )
       ) : (
         <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-6 sm:space-y-8">
           {messages.map((msg) => renderBubble(msg, false))}

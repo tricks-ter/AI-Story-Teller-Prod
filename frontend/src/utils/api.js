@@ -15,7 +15,7 @@ function clampRetryAfter(v) {
  *  - one automatic retry on 429 (HTTP-level or SSE error event),
  *  - ONLY when no content was streamed yet (never duplicates narration),
  *  - honors Retry-After (clamped 1–10s),
- *  - surfaces human-readable status while cooling down.
+ *  - synthesizes a final `done` if the connection dies silently (prevents UI hang).
  */
 async function runStream(url, body, controller, onEvent, onError) {
   const MAX_ATTEMPTS = 2;
@@ -48,6 +48,7 @@ async function runStream(url, body, controller, onEvent, onError) {
 
     let streamed = false;
     let retryInfo = null;
+    let sawTerminal = false;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
@@ -65,6 +66,7 @@ async function runStream(url, body, controller, onEvent, onError) {
           let ev;
           try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
           if (ev.type === "content") streamed = true;
+          if (ev.type === "done" || ev.type === "error") sawTerminal = true;
           if (ev.type === "error" && ev.code === 429 && !streamed) { retryInfo = ev; break outer; }
           onEvent(ev);
           if (ev.type === "error" || ev.type === "done") return;
@@ -84,6 +86,10 @@ async function runStream(url, body, controller, onEvent, onError) {
     if (retryInfo) {
       onEvent({ type: "error", message: retryInfo.message || "The AI engine is rate-limited (429). Please wait a moment and try again." });
       return;
+    }
+    // Silent EOF (connection died mid-stream): finalize gracefully so UI never hangs.
+    if (!sawTerminal) {
+      onEvent({ type: "done" });
     }
     return;
   }
