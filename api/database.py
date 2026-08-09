@@ -79,6 +79,7 @@ class Database:
         return self._with_conn(fn, commit=commit)
 
     def init_tables(self):
+        # Runtime is migration-free. Schema is applied at deploy time by api/migrate.py.
         if not self.database_url:
             logger.warning("DATABASE_URL not set — running without DB.")
             return
@@ -235,11 +236,17 @@ class Database:
             "FROM story_characters WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
             (story_id,), fetch="all") or []
 
-    def get_story_messages(self, story_id, limit=50):
-        return self.execute_query(
-            "SELECT id, role, content, message_type, created_at "
-            "FROM story_messages WHERE story_id = %s ORDER BY id ASC LIMIT %s",
-            (story_id, int(limit)), fetch="all") or []
+    # SECURITY FIX: base_only=True returns ONLY the author's template/intro rows
+    # (playthrough_id='legacy'), never any player's private playthrough turns.
+    def get_story_messages(self, story_id, limit=50, base_only=True):
+        query = ("SELECT id, role, content, message_type, created_at "
+                 "FROM story_messages WHERE story_id = %s")
+        params = [story_id]
+        if base_only:
+            query += " AND playthrough_id = 'legacy'"
+        query += " ORDER BY id ASC LIMIT %s"
+        params.append(int(limit))
+        return self.execute_query(query, tuple(params), fetch="all") or []
 
     def get_story_notes(self, story_id, active_only=True):
         query = "SELECT content, priority FROM story_notes WHERE story_id = %s"
@@ -278,6 +285,13 @@ class Database:
                 "SELECT substr(md5(random()::text || sc.id), 1, 36), %s, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP "
                 "FROM story_characters sc WHERE sc.story_id = %s",
                 (pid, story_id))
+            # SECURITY/UX FIX: seed this playthrough with ONLY the author's base
+            # intro rows (playthrough_id='legacy') — never other players' turns.
+            cur.execute(
+                "INSERT INTO story_messages (story_id, playthrough_id, role, content, message_type, metadata, created_at) "
+                "SELECT %s, %s, role, content, message_type, metadata, CURRENT_TIMESTAMP "
+                "FROM story_messages WHERE story_id = %s AND playthrough_id = 'legacy'",
+                (story_id, pid, story_id))
             cur.execute("SELECT * FROM playthroughs WHERE id = %s", (pid,))
             return cur.fetchone()
         return self._with_conn(fn, commit=True)
@@ -331,7 +345,6 @@ class Database:
                         (json.dumps(meta), playthrough_id))
         self._with_conn(fn, commit=True)
 
-    # ADDITIVE: New method for Phase 3 Locations table
     def upsert_playthrough_location(self, playthrough_id, location_name):
         def fn(cur):
             loc_id = str(uuid.uuid4())
@@ -346,7 +359,6 @@ class Database:
                     "INSERT INTO locations (id, playthrough_id, name, description, is_discovered, metadata, created_at, updated_at) "
                     "VALUES (%s, %s, %s, '', TRUE, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                     (loc_id, playthrough_id, location_name))
-            
             cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
             pt_row = cur.fetchone()
             meta = (pt_row["metadata"] if pt_row and isinstance(pt_row["metadata"], dict) else {}) or {}
@@ -355,7 +367,6 @@ class Database:
                         (json.dumps(meta), playthrough_id))
         self._with_conn(fn, commit=True)
 
-    # ADDITIVE: New method for Phase 3 Locations table
     def get_playthrough_locations(self, playthrough_id):
         return self.execute_query(
             "SELECT id, name, description, is_discovered, metadata, created_at, updated_at "

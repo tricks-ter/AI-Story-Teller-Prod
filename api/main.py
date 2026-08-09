@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="5.0.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="5.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -166,12 +166,14 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     return {"story": story, "characters": db.get_story_characters(story_id)}
 
+# SECURITY FIX: base_only=True by default — returns ONLY the author's template/intro
+# rows, never other players' private playthrough conversations.
 @router.get("/stories/{story_id}/messages")
-def get_story_messages(story_id: str, raw: Request, limit: int = 50):
+def get_story_messages(story_id: str, raw: Request, limit: int = 50, base_only: bool = True):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
-    return db.get_story_messages(story_id, limit=min(max(int(limit), 1), 200))
+    return db.get_story_messages(story_id, limit=min(max(int(limit), 1), 200), base_only=base_only)
 
 @router.post("/stories/{story_id}/play")
 def play_story(story_id: str, raw: Request):

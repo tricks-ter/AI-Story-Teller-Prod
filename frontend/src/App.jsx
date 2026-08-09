@@ -101,22 +101,18 @@ export default function App() {
       const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
       let msgData = await parseJsonSafe(msgRes);
       if (!msgRes.ok) throw new Error(friendlyHttp(msgRes.status, msgData?.detail));
-      
+
       let seeded = (Array.isArray(msgData) ? msgData : []);
-      
-      // ═══════════════════════════════════════════════════════════════
-      // ADDITIVE BUG FIX: If playthrough is brand new and has no 
-      // messages, fetch the original Story's intro message instead 
-      // of showing the standalone chat placeholder.
-      // ═══════════════════════════════════════════════════════════════
+
+      // SECURITY FIX: fallback fetches ONLY the author's base intro rows
+      // (base_only=true) — never other players' conversations.
       if (seeded.length === 0) {
-        const baseMsgRes = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=50`, { headers: authHeaders() });
+        const baseMsgRes = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=50&base_only=true`, { headers: authHeaders() });
         const baseMsgData = await parseJsonSafe(baseMsgRes);
         if (baseMsgRes.ok && Array.isArray(baseMsgData) && baseMsgData.length > 0) {
           seeded = baseMsgData;
         }
       }
-      // ═══════════════════════════════════════════════════════════════
 
       const mapped = seeded.map(m => ({
         id: `db-${m.id}`,
@@ -125,7 +121,7 @@ export default function App() {
         timestamp: m.created_at,
         narrative: true
       }));
-      
+
       setMessages(mapped);
       mapped.forEach(m => appendMessage(session.session_id, m));
     } catch (err) {
