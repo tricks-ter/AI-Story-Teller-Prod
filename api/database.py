@@ -124,6 +124,12 @@ class Database:
             return True
         return self._with_conn(fn, commit=True) is True
 
+    def delete_auth_token(self, token):
+        self.execute_query("DELETE FROM auth_tokens WHERE token = %s", (token,), fetch="none", commit=True)
+
+    def purge_expired_tokens(self):
+        self.execute_query("DELETE FROM auth_tokens WHERE expires_at < CURRENT_TIMESTAMP", fetch="none", commit=True)
+
     def touch_user_login(self, user_id, telemetry=None):
         def fn(cur):
             cur.execute("SELECT metadata FROM users WHERE id = %s", (user_id,))
@@ -195,16 +201,30 @@ class Database:
             (session_id,), fetch="one")
 
     # ── Stories (templates) ──
-    def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None, telemetry=None):
+    def create_story(self, story_id, title, genre, premise, metadata=None, creator_id=None, telemetry=None, is_public=True):
         if not self.database_url: return
         cid = creator_id or LEGACY_USER_ID
         merged = _merge_telemetry(metadata, telemetry, telemetry_key="created_telemetry")
+        try:
+            self.execute_query(
+                "INSERT INTO stories (id, title, genre, premise, current_day, time_of_day, creator_id, "
+                "is_premium, energy_cost, is_public, metadata, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, 1, 'Morning', %s, FALSE, 0, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (story_id, title, genre, premise, cid, bool(is_public), json.dumps(merged)),
+                fetch="none", commit=True)
+        except Exception:
+            # Fallback if migration 0007 hasn't landed yet (deploy ordering safety)
+            self.execute_query(
+                "INSERT INTO stories (id, title, genre, premise, current_day, time_of_day, creator_id, "
+                "is_premium, energy_cost, metadata, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, 1, 'Morning', %s, FALSE, 0, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (story_id, title, genre, premise, cid, json.dumps(merged)),
+                fetch="none", commit=True)
+
+    def set_story_visibility(self, story_id, is_public):
         self.execute_query(
-            "INSERT INTO stories (id, title, genre, premise, current_day, time_of_day, creator_id, "
-            "is_premium, energy_cost, metadata, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, 1, 'Morning', %s, FALSE, 0, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            (story_id, title, genre, premise, cid, json.dumps(merged)),
-            fetch="none", commit=True)
+            "UPDATE stories SET is_public = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (bool(is_public), story_id), fetch="none", commit=True)
 
     def add_story_character(self, char_id, story_id, name, role, background, metadata=None, telemetry=None):
         if not self.database_url: return
@@ -227,7 +247,7 @@ class Database:
     def list_stories_for_user(self, user_id):
         if not self.database_url: return []
         return self.execute_query(
-            "SELECT s.id, s.title, s.genre, s.premise, s.current_day, s.time_of_day, s.is_premium, s.updated_at, "
+            "SELECT s.id, s.title, s.genre, s.premise, s.current_day, s.time_of_day, s.is_premium, s.is_public, s.updated_at, "
             "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
             "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role "
             "FROM stories s WHERE s.creator_id = %s ORDER BY s.updated_at DESC",
@@ -235,14 +255,25 @@ class Database:
 
     def list_all_stories(self, user_id):
         if not self.database_url: return []
-        return self.execute_query(
-            "SELECT s.id, s.title, s.genre, s.premise, s.is_premium, s.updated_at, u.username AS creator_name, "
-            "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
-            "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role, "
-            "(SELECT COUNT(*) FROM playthroughs p WHERE p.story_id = s.id AND p.user_id = %s) AS played_count "
-            "FROM stories s LEFT JOIN users u ON u.id = s.creator_id "
-            "ORDER BY s.updated_at DESC LIMIT 100",
-            (user_id,), fetch="all") or []
+        try:
+            return self.execute_query(
+                "SELECT s.id, s.title, s.genre, s.premise, s.is_premium, s.is_public, s.creator_id, s.updated_at, u.username AS creator_name, "
+                "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
+                "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role, "
+                "(SELECT COUNT(*) FROM playthroughs p WHERE p.story_id = s.id AND p.user_id = %s) AS played_count "
+                "FROM stories s LEFT JOIN users u ON u.id = s.creator_id "
+                "WHERE (s.is_public = TRUE OR s.creator_id = %s) "
+                "ORDER BY s.updated_at DESC LIMIT 100",
+                (user_id, user_id), fetch="all") or []
+        except Exception:
+            return self.execute_query(
+                "SELECT s.id, s.title, s.genre, s.premise, s.is_premium, s.updated_at, u.username AS creator_name, "
+                "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
+                "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role, "
+                "(SELECT COUNT(*) FROM playthroughs p WHERE p.story_id = s.id AND p.user_id = %s) AS played_count "
+                "FROM stories s LEFT JOIN users u ON u.id = s.creator_id "
+                "ORDER BY s.updated_at DESC LIMIT 100",
+                (user_id,), fetch="all") or []
 
     def get_story(self, story_id):
         return self.execute_query(
@@ -264,6 +295,7 @@ class Database:
         params.append(int(limit))
         return self.execute_query(query, tuple(params), fetch="all") or []
 
+    # ── Director's Notes ──
     def get_story_notes(self, story_id, active_only=True):
         query = "SELECT content, priority FROM story_notes WHERE story_id = %s"
         if active_only:
@@ -271,12 +303,27 @@ class Database:
         query += " ORDER BY priority DESC, id ASC LIMIT 10"
         return self.execute_query(query, (story_id,), fetch="all") or []
 
+    def list_story_notes_full(self, story_id):
+        return self.execute_query(
+            "SELECT id, content, priority, is_active, created_at FROM story_notes WHERE story_id = %s "
+            "ORDER BY priority DESC, id ASC LIMIT 50",
+            (story_id,), fetch="all") or []
+
     def add_story_note(self, story_id, content, priority=5, is_active=True):
-        self.execute_query(
-            "INSERT INTO story_notes (story_id, content, priority, is_active, created_at) "
-            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)",
-            (story_id, content, int(priority), bool(is_active)),
-            fetch="none", commit=True)
+        def fn(cur):
+            cur.execute(
+                "INSERT INTO story_notes (story_id, content, priority, is_active, created_at) "
+                "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING id",
+                (story_id, content, int(priority), bool(is_active)))
+            return cur.fetchone()["id"]
+        return self._with_conn(fn, commit=True)
+
+    def toggle_story_note(self, note_id, is_active):
+        self.execute_query("UPDATE story_notes SET is_active = %s WHERE id = %s",
+                           (bool(is_active), note_id), fetch="none", commit=True)
+
+    def delete_story_note(self, note_id):
+        self.execute_query("DELETE FROM story_notes WHERE id = %s", (note_id,), fetch="none", commit=True)
 
     # ── Playthroughs ──
     def get_active_playthrough(self, story_id, user_id):
@@ -462,7 +509,6 @@ class Database:
         return self._with_conn(fn, commit=True) is True
 
     def _sync_inventory_mirror(self, cur, character_id, name, add):
-        """Keeps legacy metadata.inventory (HUD count source) in sync with playthrough_items."""
         cur.execute("SELECT metadata FROM playthrough_characters WHERE id = %s", (character_id,))
         row = cur.fetchone()
         if not row: return

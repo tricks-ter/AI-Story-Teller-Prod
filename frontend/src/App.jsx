@@ -69,7 +69,11 @@ export default function App() {
     else setView("landing");
   };
 
-  const handleLogout = () => { clearAuth(); setUser(null); setStoryContext(null); setView("landing"); };
+  const handleLogout = () => {
+    // Revoke the token server-side (best effort), then clear locally
+    fetch(`${BASE_URL}/auth/logout`, { method: "POST", headers: authHeaders() }).catch(() => {});
+    clearAuth(); setUser(null); setStoryContext(null); setView("landing");
+  };
 
   const handleOpenStory = async (story) => {
     setStoryContext(story);
@@ -124,7 +128,6 @@ export default function App() {
       mapped.forEach(m => appendMessage(session.session_id, m));
     } catch (err) {
       console.error("[openStory] error:", err);
-      // Clean exit: never strand the user in story mode with a half-set context
       setStoryContext(null);
       setMessages([]);
       setView("library");

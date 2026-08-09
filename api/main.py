@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="6.2.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="6.3.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -76,6 +76,7 @@ class StoryCreateRequest(BaseModel):
     characterName: str
     characterRole: str
     characterBackground: str
+    isPublic: bool = True
     client_telemetry: Optional[dict] = None
 
 class AuthRequest(BaseModel):
@@ -87,6 +88,13 @@ class AuthRequest(BaseModel):
 class ItemActionRequest(BaseModel):
     item_id: str
     character_id: Optional[str] = None
+
+class NoteCreateRequest(BaseModel):
+    content: str
+    priority: int = 5
+
+class VisibilityRequest(BaseModel):
+    is_public: bool
 
 router = APIRouter(prefix="/api")
 
@@ -102,10 +110,23 @@ def require_user(raw: Request) -> dict:
         raise HTTPException(status_code=401, detail="Login required")
     return user
 
+def get_bearer_token(raw: Request) -> Optional[str]:
+    header = raw.headers.get("authorization", "")
+    if header.startswith("Bearer "):
+        return header[7:].strip()
+    return None
+
 def check_story_access(story: dict, user: dict):
     owner = story.get("creator_id")
     if owner and owner != user["id"] and owner != LEGACY_USER_ID:
         raise HTTPException(status_code=403, detail="This saga belongs to another author")
+    if not story.get("is_public", True) and owner != user["id"]:
+        raise HTTPException(status_code=403, detail="This saga is private")
+
+def require_story_owner(story: dict, user: dict):
+    owner = story.get("creator_id")
+    if owner != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
 
 def ensure_playthrough(story_id: str, user: dict):
     pt = db.get_active_playthrough(story_id, user["id"])
@@ -158,6 +179,8 @@ def signup(req: AuthRequest):
 
 @router.post("/auth/login")
 def login(req: AuthRequest):
+    try: db.purge_expired_tokens()
+    except Exception: pass
     row = db.get_user_by_username(req.username.strip())
     if not row or not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -165,6 +188,13 @@ def login(req: AuthRequest):
     token, expires = make_token(row["id"], req.remember_me)
     db.add_auth_token(token, row["id"], expires)
     return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"], "metadata": fresh_meta}}
+
+@router.post("/auth/logout")
+def logout(raw: Request):
+    token = get_bearer_token(raw)
+    if token:
+        db.delete_auth_token(token)
+    return {"status": "logged_out"}
 
 @router.get("/auth/me")
 def me(raw: Request):
@@ -248,6 +278,7 @@ def get_story_detail(story_id: str, raw: Request):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
     return {"story": story, "characters": db.get_story_characters(story_id)}
 
 @router.get("/stories/{story_id}/messages")
@@ -255,13 +286,66 @@ def get_story_messages(story_id: str, raw: Request, limit: int = 50, base_only: 
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
     return db.get_story_messages(story_id, limit=min(max(int(limit), 1), 200), base_only=base_only)
+
+@router.get("/stories/{story_id}/notes")
+def get_story_notes(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db.list_story_notes_full(story_id)
+
+@router.post("/stories/{story_id}/notes")
+def create_story_note(story_id: str, req: NoteCreateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    require_story_owner(story, user)
+    content = req.content.strip()
+    if not content or len(content) > 500:
+        raise HTTPException(status_code=400, detail="Note must be 1–500 characters")
+    note_id = db.add_story_note(story_id, content, priority=max(1, min(10, req.priority)))
+    if not note_id: raise HTTPException(status_code=500, detail="Could not save note")
+    return {"id": note_id, "status": "created"}
+
+@router.post("/stories/{story_id}/notes/{note_id}/toggle")
+def toggle_story_note(story_id: str, note_id: int, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    require_story_owner(story, user)
+    notes = db.list_story_notes_full(story_id)
+    current = next((n for n in notes if n["id"] == note_id), None)
+    if not current: raise HTTPException(status_code=404, detail="Note not found")
+    db.toggle_story_note(note_id, not current["is_active"])
+    return {"status": "toggled"}
+
+@router.delete("/stories/{story_id}/notes/{note_id}")
+def delete_story_note(story_id: str, note_id: int, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    require_story_owner(story, user)
+    db.delete_story_note(note_id)
+    return {"status": "deleted"}
+
+@router.post("/stories/{story_id}/visibility")
+def set_visibility(story_id: str, req: VisibilityRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    require_story_owner(story, user)
+    db.set_story_visibility(story_id, req.is_public)
+    return {"status": "updated", "is_public": req.is_public}
 
 @router.post("/stories/{story_id}/play")
 def play_story(story_id: str, raw: Request):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
     return {
@@ -287,7 +371,7 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
 
     telemetry = request.client_telemetry
     db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,
-                    creator_id=user["id"], telemetry=telemetry)
+                    creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
                            request.characterBackground, metadata=char_meta, telemetry=telemetry)
 
@@ -302,6 +386,7 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
 
     pt = ensure_playthrough(story_id, user)
     pid = pt["id"]
