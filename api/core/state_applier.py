@@ -26,18 +26,21 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                 char_name = update["character"]
                 stat_name = update["stat"]
                 new_value = update["value"]
-                if update.get("is_delta", False):
-                    chars = db.get_playthrough_characters(playthrough_id)
-                    current = None
-                    for c in chars:
-                        if c["character_name"].lower() == char_name.lower():
-                            meta = c.get("metadata") or {}
-                            current = (meta.get("stats", {})).get(stat_name, 100)
-                            break
-                    if current is not None:
-                        new_value = float(current) + float(new_value)
-                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=999):
-                    applied.append(update)
+                is_delta = update.get("is_delta", False)
+                
+                chars = db.get_playthrough_characters(playthrough_id)
+                current = 100.0
+                for c in chars:
+                    if c["character_name"].lower() == char_name.lower():
+                        meta = c.get("metadata") or {}
+                        current = float((meta.get("stats", {})).get(stat_name, 100))
+                        break
+                
+                target = float(current) + float(new_value) if is_delta else float(new_value)
+                clamped = max(0.0, min(float(999), target))
+                
+                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, clamped, max_value=999):
+                    applied.append({**update, "value": clamped, "is_delta": False})
 
             elif utype == "LOCATION_UPDATE":
                 if db.upsert_playthrough_location(playthrough_id, update["location"], update.get("description", "")):
@@ -74,6 +77,10 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                     applied.append(update)
                 else:
                     rejected.append({**update, "reason": "backpack_error"})
+
+            elif utype == "CURRENCY_UPDATE":
+                new_val = db.update_playthrough_currency(playthrough_id, update["amount"], is_delta=update.get("add", True))
+                applied.append({"type": "CURRENCY_UPDATE", "amount": new_val, "is_delta": False})
 
             elif utype == "SAGA_END":
                 db.complete_playthrough(playthrough_id)

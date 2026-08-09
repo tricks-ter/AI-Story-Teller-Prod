@@ -11,8 +11,6 @@ from database import db
 
 
 def _recent_messages(playthrough_id: str, limit: int = 15):
-    """Phase 5.5 fix: fetch the LAST `limit` rows (DESC) and reverse to chronological.
-    The old ASC+LIMIT call returned the OLDEST rows, blinding the model to recent turns."""
     rows = db.execute_query(
         "SELECT id, role, content, message_type, created_at FROM story_messages "
         "WHERE playthrough_id = %s ORDER BY id DESC LIMIT %s",
@@ -43,35 +41,34 @@ Hidden state tags (own line):
   [TIME_UPDATE: Day X, TimeOfDay]
   [STAT_UPDATE: CharacterName.StatName = NewValue] / [STAT_UPDATE: CharacterName.StatName -10]
   [LOCATION_UPDATE: LocationName | desc=One-sentence chronicle of the place]
-  [ITEM_UPDATE: CharacterName + ItemName | type=weapon, slot=main_hand, rarity=rare, level=4, weight=3, bonus.Health=10, desc=Short description]
+  [ITEM_UPDATE: CharacterName + ItemName | type=weapon, slot=main_hand, rarity=rare, level=4, weight=3, bonus.Health=10, desc=Short description, use_effect=What happens when used]
   [ITEM_UPDATE: CharacterName - ItemName]
   [ABILITY_UPDATE: CharacterName + Ability Name | desc=What it does]
   [BAG_UPDATE: CharacterName level N]
+  [CURRENCY_UPDATE: CharacterName + N] / [CURRENCY_UPDATE: CharacterName - N]
   [SAGA_END] (ONLY when the player explicitly ends the story or a true ending is reached)
 Item types: weapon, armor, accessory, consumable, material, quest.
 Slots: main_hand, off_hand, head, body, ring, amulet, trinket.
 Rarities: common, uncommon, rare, epic, legendary.
 
 [STATE TAG RULES - CRITICAL]
-- Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/spirit rings/knowledge -> ABILITY_UPDATE (never in backpack). Example: absorbing a boar soul ring => [ABILITY_UPDATE: Lin Chen + Obsidian Spatial Sense | desc=Bend distance and balance around you].
-- ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise on your first response.
-- Always include short desc= for new items, abilities and locations.
+- Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/spirit rings/knowledge -> ABILITY_UPDATE (never in backpack).
+- ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are.
+- Always include short desc= and use_effect= for new items. Use_effect explains what happens if the item is used/consumed.
 - Names must NOT contain "key=value" fragments; attributes go ONLY after the | separator.
-- Respect remaining backpack capacity — do not grant loot that won't fit.
+- Respect remaining backpack capacity.
+- Currency (coins, gold, credits) -> CURRENCY_UPDATE.
 
 [TIME RULES - CRITICAL]
 - Emit [TIME_UPDATE] on EVERY response. One scene ≈ one period: Morning → Afternoon → Evening → Night.
-- After Night comes Morning of Day+1. Sleeping, long travel or long battles always advance time.
 
 [CONTINUITY RULES - CRITICAL]
 - NEVER re-tell, recap or repeat a scene that already happened. Start every response from CURRENT SITUATION below.
 - If the player asks a question (where am I? what now?), answer it directly and briefly in-world, then move the scene forward.
-- Never treat items/abilities listed in WORLD STATE as new discoveries.
 
 [PLAYER AGENCY RULES - CRITICAL]
 - NEVER perform the player's chosen action for them, and NEVER describe its outcome.
 - Stop at the moment of decision, or just as the action begins.
-- The player is the only author of their character's choices.
 
 [STYLE RULES - CRITICAL]
 - CLEAR, SIMPLE, EASY-TO-IMAGINE language. What can be SEEN, HEARD, FELT.

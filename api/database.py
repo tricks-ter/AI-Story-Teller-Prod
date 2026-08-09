@@ -659,6 +659,7 @@ class Database:
         weight = max(0, min(99, int(attrs.get("weight", 1) if attrs.get("weight") is not None else 1)))
         bonuses = attrs.get("bonuses") if isinstance(attrs.get("bonuses"), dict) else {}
         description = attrs.get("description", "") or self.DEFAULT_ITEM_DESCRIPTIONS.get(name, "")
+        use_effect = attrs.get("use_effect", "")
         stackable = itype in self.STACKABLE_TYPES
 
         def fn(cur):
@@ -693,6 +694,7 @@ class Database:
 
             meta = {"description": description}
             if bonuses: meta["bonuses"] = bonuses
+            if use_effect: meta["use_effect"] = use_effect
             cur.execute(
                 "INSERT INTO playthrough_items (id, playthrough_id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata, created_at, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -842,6 +844,32 @@ class Database:
                         (json.dumps(meta), row["id"]))
             return True
         return self._with_conn(fn, commit=True) is True
+
+    # ── Currency ──
+    def get_playthrough_currency(self, playthrough_id):
+        try:
+            row = self.execute_query("SELECT currency FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
+            if row and "currency" in row: return int(row["currency"])
+        except Exception: pass
+        meta = self.execute_query("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
+        if meta and isinstance(meta.get("metadata"), dict):
+            return int(meta["metadata"].get("currency", 0))
+        return 0
+
+    def update_playthrough_currency(self, playthrough_id, amount, is_delta=True):
+        current = self.get_playthrough_currency(playthrough_id)
+        new_val = current + int(amount) if is_delta else int(amount)
+        new_val = max(0, min(999999, new_val))
+        try:
+            self.execute_query("UPDATE playthroughs SET currency = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                               (new_val, playthrough_id), fetch="none", commit=True)
+        except Exception:
+            meta = self.execute_query("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
+            m = (meta["metadata"] if meta and isinstance(meta.get("metadata"), dict) else {}) or {}
+            m["currency"] = new_val
+            self.execute_query("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                               (json.dumps(m), playthrough_id), fetch="none", commit=True)
+        return new_val
 
 db = Database()
 

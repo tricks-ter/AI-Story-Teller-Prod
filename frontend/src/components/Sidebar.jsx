@@ -1,4 +1,6 @@
+import React from "react";
 import { PlusCircle, MessageSquare, Trash2, Bot } from "lucide-react";
+import HUD from "./HUD";
 
 function formatDate(iso) {
   const d = new Date(iso);
@@ -13,7 +15,7 @@ function formatDate(iso) {
   return d.toLocaleDateString();
 }
 
-export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDelete, isOpen }) {
+export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDelete, isOpen, storyContext }) {
   return (
     <aside
       className={`
@@ -24,6 +26,8 @@ export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDele
         ${isOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
       `}
     >
+      {storyContext && <HUD storyContext={storyContext} />}
+      
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-5 border-b border-gray-800 flex-shrink-0">
         <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-brand-600">

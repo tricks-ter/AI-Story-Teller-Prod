@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.1.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -250,48 +251,49 @@ def get_inventory(playthrough_id: str, raw: Request):
     for c in db.get_playthrough_characters(playthrough_id):
         ab = (c.get("metadata") or {}).get("abilities", [])
         abilities[c["id"]] = ab if isinstance(ab, list) else []
-    return {"items": items, "equipment": equipment, "backpacks": backpacks, "bonuses": bonuses, "abilities": abilities}
+    currency = db.get_playthrough_currency(playthrough_id)
+    return {"items": items, "equipment": equipment, "backpacks": backpacks, "bonuses": bonuses, "abilities": abilities, "currency": currency}
 
 @router.post("/playthroughs/{playthrough_id}/equip")
-def equip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
+async def equip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
     char_id = _resolve_player_char(playthrough_id, req.character_id)
     if not char_id: raise HTTPException(status_code=400, detail="No character found")
-    res = db.equip_item(playthrough_id, char_id, req.item_id)
+    res = await asyncio.to_thread(db.equip_item, playthrough_id, char_id, req.item_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not equip item."))
     return {"status": "equipped"}
 
 @router.post("/playthroughs/{playthrough_id}/unequip")
-def unequip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
+async def unequip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
     char_id = _resolve_player_char(playthrough_id, req.character_id)
     if not char_id: raise HTTPException(status_code=400, detail="No character found")
-    res = db.unequip_item(playthrough_id, char_id, req.item_id)
+    res = await asyncio.to_thread(db.unequip_item, playthrough_id, char_id, req.item_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not unequip item."))
     return {"status": "unequipped"}
 
 @router.post("/playthroughs/{playthrough_id}/use")
-def use_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
+async def use_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
     char_id = _resolve_player_char(playthrough_id, req.character_id)
     if not char_id: raise HTTPException(status_code=400, detail="No character found")
-    res = db.use_item(playthrough_id, char_id, req.item_id)
+    res = await asyncio.to_thread(db.use_item, playthrough_id, char_id, req.item_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not use item."))
     return {"status": "used", "name": res.get("name")}
 
 @router.post("/playthroughs/{playthrough_id}/drop")
-def drop_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
+async def drop_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
     char_id = _resolve_player_char(playthrough_id, req.character_id)
     if not char_id: raise HTTPException(status_code=400, detail="No character found")
-    res = db.drop_item(playthrough_id, char_id, req.item_id)
+    res = await asyncio.to_thread(db.drop_item, playthrough_id, char_id, req.item_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not drop item."))
     return {"status": "dropped", "name": res.get("name")}
@@ -377,6 +379,7 @@ def play_story(story_id: str, raw: Request):
     check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
+    pt["currency"] = db.get_playthrough_currency(pt["id"])
     return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
 
 @router.post("/stories")
@@ -457,8 +460,6 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
         clean_text, state_updates = resolve_state(full_content)
         result = apply_state_updates(pid, state_updates)
 
-        # Phase 5.5 — Pulse state-sync: legacy repair, reconciled deltas,
-        # rolling summary + situation, deterministic clock fallback. Best-effort.
         time_moved = any(u.get("type") == "TIME_UPDATE" for u in result["applied"])
         try:
             sync = run_state_sync(pid, request.user_action, clean_text, time_already_moved=time_moved)
@@ -471,7 +472,8 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
                                    metadata=meta, telemetry=telemetry)
 
         fresh = db.get_playthrough(pid)
-        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': result['applied'], 'rejected': result['rejected'], 'day': fresh['current_day'], 'time_of_day': fresh['time_of_day'], 'status': fresh['status']})}\n\n"
+        fresh["currency"] = db.get_playthrough_currency(pid)
+        yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': result['applied'], 'rejected': result['rejected'], 'day': fresh['current_day'], 'time_of_day': fresh['time_of_day'], 'status': fresh['status'], 'currency': fresh['currency']})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

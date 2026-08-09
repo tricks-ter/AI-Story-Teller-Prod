@@ -4,26 +4,18 @@ from typing import Tuple, List, Dict, Any
 VALID_TIMES = {"Morning", "Afternoon", "Evening", "Night"}
 
 ATTR_KEY_RE = re.compile(
-    r'(?:type|slot|rarity|level|weight|desc|description|bonus\.[A-Za-z0-9_]+)\s*=',
+    r'(?:type|slot|rarity|level|weight|desc|description|use_effect|bonus\.[A-Za-z0-9_]+)\s*=',
     re.IGNORECASE)
 
 def split_name_attrs(main_part: str) -> Tuple[str, str]:
-    """
-    Phase 5.5 salvage: models sometimes comma-join attributes into the entity
-    name instead of using the '|' separator. Split at the first comma/pipe that
-    is immediately followed by a known key= so names stay clean.
-    Returns (clean_main, raw_attrs_tail).
-    """
     m = re.search(
-        r'[,|]\s*(?=(?:type|slot|rarity|level|weight|desc|description|bonus\.[A-Za-z0-9_]+)\s*=)',
+        r'[,|]\s*(?=(?:type|slot|rarity|level|weight|desc|description|use_effect|bonus\.[A-Za-z0-9_]+)\s*=)',
         main_part, re.IGNORECASE)
     if not m:
         return main_part.strip(), ""
     return main_part[:m.start()].strip(), main_part[m.start():].lstrip(",| ").strip()
 
 def clean_entity_name(name: str, max_len: int = 60) -> str:
-    """Normalize an item/ability name: collapse spaces, cut any stray key=value
-    fragments, trim separators, cap length. Never returns empty for non-empty input."""
     s = re.sub(r'\s+', ' ', name or "").strip()
     if ATTR_KEY_RE.search(s):
         s = ATTR_KEY_RE.split(s, 1)[0]
@@ -33,19 +25,7 @@ def clean_entity_name(name: str, max_len: int = 60) -> str:
     return s[:max_len].strip()
 
 def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
-    """
-    Extracts hidden state tags from AI response and returns clean text + structured updates.
-    Tags:
-      [TIME_UPDATE: Day X, TimeOfDay]
-      [STAT_UPDATE: CharacterName.StatName = Value] / [STAT_UPDATE: CharacterName.StatName -10]
-      [LOCATION_UPDATE: LocationName | desc=Short chronicle of the place]
-      [ITEM_UPDATE: CharacterName + ItemName | type=..., slot=..., rarity=..., level=..., weight=..., bonus.X=..., desc=...]
-      [ITEM_UPDATE: CharacterName - ItemName]
-      [ABILITY_UPDATE: CharacterName + Ability Name | desc=...]
-      [BAG_UPDATE: CharacterName level N]
-      [SAGA_END]
-    """
-    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|SAGA_END):\s*([^\]]+)\]'
+    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|CURRENCY_UPDATE|SAGA_END):\s*([^\]]+)\]'
     updates = []
 
     def replacer(match):
@@ -75,6 +55,8 @@ def _parse_attrs(raw: str) -> Dict[str, Any]:
                 pass
         elif k in ("desc", "description"):
             out["description"] = v
+        elif k == "use_effect":
+            out["use_effect"] = v
         else:
             out[k] = v
     typed: Dict[str, Any] = {}
@@ -82,6 +64,7 @@ def _parse_attrs(raw: str) -> Dict[str, Any]:
     if "slot" in out: typed["slot"] = out["slot"].lower()
     if "rarity" in out: typed["rarity"] = out["rarity"].lower()
     if "description" in out: typed["description"] = out["description"]
+    if "use_effect" in out: typed["use_effect"] = out["use_effect"]
     try:
         if "level" in out: typed["level"] = int(float(out["level"]))
     except Exception:
@@ -172,6 +155,12 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             character = m.group(1).strip(); level = int(m.group(2))
             if not character: return None
             return {"type": "BAG_UPDATE", "character": character, "level": level}
+
+        elif tag_type == "CURRENCY_UPDATE":
+            m = re.match(r'^(.+?)\s*([+-])\s*(\d+)$', payload.strip())
+            if not m: return None
+            character = m.group(1).strip(); op = m.group(2); amount = int(m.group(3))
+            return {"type": "CURRENCY_UPDATE", "character": character, "add": op == "+", "amount": amount}
 
         elif tag_type == "SAGA_END":
             return {"type": "SAGA_END"}

@@ -171,3 +171,4 @@ narrated effect; N+1 queries in prompt assembly (perf note); no library search/f
 3. Implement the next roadmap phase or the user's request additively.
 4. Append a section-9 entry.
 5. Verify with user-facing checklists (Actions tab green, in-app behaviors).
+- Phase 5.6 Industrial Polish & State Hardening: fixed -5 HP critical bug via clamped absolute state deltas; implemented lightning-fast Optimistic UI updates for inventory actions; added async `to_thread` DB offload to FastAPI endpoints; added full Currency system (DB column + JSONB fallback, `CURRENCY_UPDATE` tag, HUD UI); moved HUD into Sidebar for persistent visibility; grouped identical inventory items into single slots with total count; added `use_effect` field for all items. Migration 0010_currency.sql added.
