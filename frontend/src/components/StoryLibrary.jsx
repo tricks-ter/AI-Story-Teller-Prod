@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { ArrowLeft, BookOpen, Plus, Clock, History, Globe, User } from 'lucide-react';
+import { ArrowLeft, BookOpen, Plus, Clock, History, Globe, User, Play } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkError } from '../utils/auth';
 
 function timeAgo(iso) {
@@ -18,6 +18,9 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const [myStories, setMyStories] = useState(null);
   const [history, setHistory] = useState(null);
   const [error, setError] = useState(null);
+  
+  // ADDITIVE: State to track the selected story for the Details View
+  const [selectedStory, setSelectedStory] = useState(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -70,10 +73,26 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
     { id: 'history', label: 'History', icon: History },
   ];
 
+  // ADDITIVE: Intercept click to show details instead of immediately playing
+  const handleCardClick = (s, isHistory) => {
+    setSelectedStory({
+      id: s.story_id || s.id,
+      title: s.title,
+      genre: s.genre,
+      premise: s.premise,
+      character_name: s.character_name,
+      character_role: s.character_role,
+      creator_name: s.creator_name,
+      current_day: s.current_day,
+      time_of_day: s.time_of_day,
+      is_history: isHistory
+    });
+  };
+
   const renderCard = (s, isHistory) => (
     <button
       key={isHistory ? s.playthrough_id : s.id}
-      onClick={() => onOpenStory({ id: s.story_id || s.id, title: s.title, genre: s.genre, premise: s.premise, character_name: s.character_name })}
+      onClick={() => handleCardClick(s, isHistory)}
       className="bg-gray-900/60 border border-gray-800 hover:border-purple-500/50 rounded-2xl p-5 text-left transition-all active:scale-95 touch-manipulation"
     >
       <div className="flex items-center justify-between mb-2">
@@ -91,6 +110,69 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   );
 
   const list = tab === 'all' ? allStories : tab === 'mine' ? myStories : history;
+
+  // ═══════════════════════════════════════════════════════════════
+  // ADDITIVE: Story Details View (Forge Page)
+  // ═══════════════════════════════════════════════════════════════
+  if (selectedStory) {
+    return (
+      <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">
+        <header className="flex items-center gap-2 px-3 py-3 border-b border-gray-800 bg-gray-900 flex-shrink-0">
+          <button onClick={() => setSelectedStory(null)} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center touch-manipulation">
+            <ArrowLeft size={18} />
+          </button>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-white truncate">Story Details</h2>
+          </div>
+        </header>
+        
+        <div className="flex-1 overflow-y-auto p-6 max-w-2xl mx-auto w-full">
+          <div className="bg-gray-900/60 border border-gray-800 rounded-2xl p-6 mb-6 shadow-xl">
+             <div className="flex items-center gap-2 mb-3">
+               <span className="text-[10px] font-bold uppercase tracking-wide text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">{selectedStory.genre}</span>
+               {selectedStory.is_history && (
+                 <span className="text-[10px] font-bold uppercase tracking-wide text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-full">In Progress</span>
+               )}
+             </div>
+             
+             <h1 className="text-2xl sm:text-3xl font-bold text-white mb-4 leading-tight">{selectedStory.title}</h1>
+             
+             {selectedStory.is_history && (
+               <p className="text-sm text-blue-400 mb-4 flex items-center gap-1.5">
+                 <Clock size={14} /> Resuming from Day {selectedStory.current_day} · {selectedStory.time_of_day}
+               </p>
+             )}
+             
+             <div className="mb-6">
+               <h3 className="text-xs font-bold uppercase tracking-wide text-gray-500 mb-2">The Premise</h3>
+               <p className="text-gray-300 leading-relaxed whitespace-pre-wrap">{selectedStory.premise}</p>
+             </div>
+             
+             <div className="border-t border-gray-800 pt-4">
+                <h3 className="text-xs font-bold uppercase tracking-wide text-gray-500 mb-2">Protagonist</h3>
+                <p className="text-lg font-bold text-white">
+                  {selectedStory.character_name || "Unknown Hero"} 
+                  <span className="text-gray-500 font-normal text-sm ml-2">({selectedStory.character_role || "Adventurer"})</span>
+                </p>
+             </div>
+
+             {selectedStory.creator_name && (
+               <p className="text-xs text-gray-500 mt-6 pt-4 border-t border-gray-800">Authored by {selectedStory.creator_name}</p>
+             )}
+          </div>
+
+          <button
+            onClick={() => { onOpenStory(selectedStory); setSelectedStory(null); }}
+            className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-bold py-4 rounded-xl text-lg shadow-lg shadow-purple-900/20 active:scale-95 touch-manipulation min-h-[56px] flex items-center justify-center gap-2 transition-all"
+          >
+            <Play size={20} fill="currentColor" />
+            {selectedStory.is_history ? "Resume Journey" : "Start Journey"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  // ═══════════════════════════════════════════════════════════════
 
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">

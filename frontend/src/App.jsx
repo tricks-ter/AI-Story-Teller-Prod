@@ -99,17 +99,35 @@ export default function App() {
       });
 
       const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
-      const msgData = await parseJsonSafe(msgRes);
+      let msgData = await parseJsonSafe(msgRes);
       if (!msgRes.ok) throw new Error(friendlyHttp(msgRes.status, msgData?.detail));
-      const seeded = (Array.isArray(msgData) ? msgData : []).map(m => ({
+      
+      let seeded = (Array.isArray(msgData) ? msgData : []);
+      
+      // ═══════════════════════════════════════════════════════════════
+      // ADDITIVE BUG FIX: If playthrough is brand new and has no 
+      // messages, fetch the original Story's intro message instead 
+      // of showing the standalone chat placeholder.
+      // ═══════════════════════════════════════════════════════════════
+      if (seeded.length === 0) {
+        const baseMsgRes = await fetch(`${BASE_URL}/stories/${story.id}/messages?limit=50`, { headers: authHeaders() });
+        const baseMsgData = await parseJsonSafe(baseMsgRes);
+        if (baseMsgRes.ok && Array.isArray(baseMsgData) && baseMsgData.length > 0) {
+          seeded = baseMsgData;
+        }
+      }
+      // ═══════════════════════════════════════════════════════════════
+
+      const mapped = seeded.map(m => ({
         id: `db-${m.id}`,
         role: m.role === "system" ? "assistant" : m.role,
         content: m.content,
         timestamp: m.created_at,
         narrative: true
       }));
-      setMessages(seeded);
-      seeded.forEach(m => appendMessage(session.session_id, m));
+      
+      setMessages(mapped);
+      mapped.forEach(m => appendMessage(session.session_id, m));
     } catch (err) {
       console.error("[openStory] error:", err);
       setError(describeNetworkError(err));
