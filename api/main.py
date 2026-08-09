@@ -20,6 +20,7 @@ from core.auth import hash_password, verify_password, make_token, get_user_by_to
 from core.prompt_assembler import PromptAssembler
 from core.state_resolver import resolve_state
 from core.state_applier import apply_state_updates
+from core.state_sync import run_state_sync
 from core.resilience import call_with_retry, UpstreamRateLimited, extract_status, extract_retry_after, friendly_upstream
 
 load_dotenv()
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.0.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -175,7 +176,7 @@ def signup(req: AuthRequest):
         "last_login_at": datetime.now(timezone.utc).isoformat(), "created_via": "signup",
     }
     ok = db.create_user_with_token(user_id, username, hash_password(req.password), token, expires,
-                                    metadata=initial_meta, telemetry=req.client_telemetry)
+                                   metadata=initial_meta, telemetry=req.client_telemetry)
     if not ok: raise HTTPException(status_code=500, detail="Could not save account. Please try again.")
     final_meta = dict(initial_meta)
     final_meta["signup_telemetry"] = req.client_telemetry
@@ -455,6 +456,15 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
 
         clean_text, state_updates = resolve_state(full_content)
         result = apply_state_updates(pid, state_updates)
+
+        # Phase 5.5 — Pulse state-sync: legacy repair, reconciled deltas,
+        # rolling summary + situation, deterministic clock fallback. Best-effort.
+        time_moved = any(u.get("type") == "TIME_UPDATE" for u in result["applied"])
+        try:
+            sync = run_state_sync(pid, request.user_action, clean_text, time_already_moved=time_moved)
+            time_moved = time_moved or bool(sync.get("time_moved"))
+        except Exception as e:
+            logger.error(f"state sync skipped: {e}")
 
         meta = {"model": request.model, "temperature": request.temperature, "chars": len(clean_text)}
         db.add_playthrough_message(story_id, pid, "assistant", clean_text, msg_type="narration",

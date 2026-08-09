@@ -9,6 +9,17 @@ for _p in (PARENT_DIR, BASE_DIR):
 
 from database import db
 
+
+def _recent_messages(playthrough_id: str, limit: int = 15):
+    """Phase 5.5 fix: fetch the LAST `limit` rows (DESC) and reverse to chronological.
+    The old ASC+LIMIT call returned the OLDEST rows, blinding the model to recent turns."""
+    rows = db.execute_query(
+        "SELECT id, role, content, message_type, created_at FROM story_messages "
+        "WHERE playthrough_id = %s ORDER BY id DESC LIMIT %s",
+        (playthrough_id, int(limit)), fetch="all") or []
+    return list(reversed(rows))
+
+
 class PromptAssembler:
     def __init__(self, playthrough_id: str):
         self.playthrough_id = playthrough_id
@@ -22,7 +33,7 @@ class PromptAssembler:
             return "You are a helpful assistant."
 
         characters = db.get_playthrough_characters(self.playthrough_id)
-        messages = db.get_playthrough_messages(self.playthrough_id, limit=15)
+        messages = _recent_messages(self.playthrough_id, limit=15)
         notes = db.get_story_notes(story["id"], active_only=True)
 
         system = f"""[SYSTEM INSTRUCTIONS]
@@ -36,16 +47,26 @@ Hidden state tags (own line):
   [ITEM_UPDATE: CharacterName - ItemName]
   [ABILITY_UPDATE: CharacterName + Ability Name | desc=What it does]
   [BAG_UPDATE: CharacterName level N]
-  [SAGA_END]  (ONLY when the player explicitly ends the story or a true ending is reached)
+  [SAGA_END] (ONLY when the player explicitly ends the story or a true ending is reached)
 Item types: weapon, armor, accessory, consumable, material, quest.
 Slots: main_hand, off_hand, head, body, ring, amulet, trinket.
 Rarities: common, uncommon, rare, epic, legendary.
 
 [STATE TAG RULES - CRITICAL]
-- Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/knowledge -> ABILITY_UPDATE (never in backpack).
+- Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/spirit rings/knowledge -> ABILITY_UPDATE (never in backpack). Example: absorbing a boar soul ring => [ABILITY_UPDATE: Lin Chen + Obsidian Spatial Sense | desc=Bend distance and balance around you].
 - ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise on your first response.
 - Always include short desc= for new items, abilities and locations.
+- Names must NOT contain "key=value" fragments; attributes go ONLY after the | separator.
 - Respect remaining backpack capacity — do not grant loot that won't fit.
+
+[TIME RULES - CRITICAL]
+- Emit [TIME_UPDATE] on EVERY response. One scene ≈ one period: Morning → Afternoon → Evening → Night.
+- After Night comes Morning of Day+1. Sleeping, long travel or long battles always advance time.
+
+[CONTINUITY RULES - CRITICAL]
+- NEVER re-tell, recap or repeat a scene that already happened. Start every response from CURRENT SITUATION below.
+- If the player asks a question (where am I? what now?), answer it directly and briefly in-world, then move the scene forward.
+- Never treat items/abilities listed in WORLD STATE as new discoveries.
 
 [PLAYER AGENCY RULES - CRITICAL]
 - NEVER perform the player's chosen action for them, and NEVER describe its outcome.
@@ -67,6 +88,10 @@ Time of Day: {pt['time_of_day']}
         meta = pt.get("metadata") or {}
         if meta.get("current_location"):
             world += f"Current Location: {meta['current_location']}\n"
+
+        if meta.get("story_summary"):
+            world += f"\n[STORY SO FAR]\n{meta['story_summary']}\n"
+        world += f"\n[CURRENT SITUATION]\n{meta.get('current_situation', '') or 'The story is just beginning.'}\n"
 
         world += "\nActive Characters:\n"
         for c in characters:

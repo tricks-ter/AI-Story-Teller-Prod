@@ -3,8 +3,38 @@ from typing import Tuple, List, Dict, Any
 
 VALID_TIMES = {"Morning", "Afternoon", "Evening", "Night"}
 
+ATTR_KEY_RE = re.compile(
+    r'(?:type|slot|rarity|level|weight|desc|description|bonus\.[A-Za-z0-9_]+)\s*=',
+    re.IGNORECASE)
+
+def split_name_attrs(main_part: str) -> Tuple[str, str]:
+    """
+    Phase 5.5 salvage: models sometimes comma-join attributes into the entity
+    name instead of using the '|' separator. Split at the first comma/pipe that
+    is immediately followed by a known key= so names stay clean.
+    Returns (clean_main, raw_attrs_tail).
+    """
+    m = re.search(
+        r'[,|]\s*(?=(?:type|slot|rarity|level|weight|desc|description|bonus\.[A-Za-z0-9_]+)\s*=)',
+        main_part, re.IGNORECASE)
+    if not m:
+        return main_part.strip(), ""
+    return main_part[:m.start()].strip(), main_part[m.start():].lstrip(",| ").strip()
+
+def clean_entity_name(name: str, max_len: int = 60) -> str:
+    """Normalize an item/ability name: collapse spaces, cut any stray key=value
+    fragments, trim separators, cap length. Never returns empty for non-empty input."""
+    s = re.sub(r'\s+', ' ', name or "").strip()
+    if ATTR_KEY_RE.search(s):
+        s = ATTR_KEY_RE.split(s, 1)[0]
+    s = s.strip(" ,;|-")
+    if not s and name:
+        s = name[:max_len].strip()
+    return s[:max_len].strip()
+
 def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
+    Extracts hidden state tags from AI response and returns clean text + structured updates.
     Tags:
       [TIME_UPDATE: Day X, TimeOfDay]
       [STAT_UPDATE: CharacterName.StatName = Value] / [STAT_UPDATE: CharacterName.StatName -10]
@@ -15,7 +45,7 @@ def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
       [BAG_UPDATE: CharacterName level N]
       [SAGA_END]
     """
-    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|SAGA_END):\s*([^\]]*)\]'
+    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|SAGA_END):\s*([^\]]+)\]'
     updates = []
 
     def replacer(match):
@@ -98,7 +128,7 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             if "|" in payload:
                 main_part, attr_part = payload.split("|", 1)
                 attrs = _parse_attrs(attr_part)
-            name = main_part.strip()
+            name = clean_entity_name(main_part, max_len=80)
             if not name: return None
             return {"type": "LOCATION_UPDATE", "location": name, "description": attrs.get("description", "")}
 
@@ -108,9 +138,14 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             if "|" in payload:
                 main_part, attr_part = payload.split("|", 1)
                 attrs = _parse_attrs(attr_part)
-            m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
+            name_part, tail = split_name_attrs(main_part)
+            if tail:
+                for k, v in _parse_attrs(tail).items():
+                    attrs.setdefault(k, v)
+            m = re.match(r'^(.+?)\s*([+-])\s*(.+)$', name_part.strip())
             if not m: return None
-            character = m.group(1).strip(); op = m.group(2); item = m.group(3).strip()
+            character = clean_entity_name(m.group(1), max_len=60); op = m.group(2)
+            item = clean_entity_name(m.group(3))
             if not character or not item: return None
             return {"type": "ITEM_UPDATE", "character": character, "add": op == "+", "item": item, "attrs": attrs}
 
@@ -120,9 +155,14 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             if "|" in payload:
                 main_part, attr_part = payload.split("|", 1)
                 attrs = _parse_attrs(attr_part)
-            m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
+            name_part, tail = split_name_attrs(main_part)
+            if tail:
+                for k, v in _parse_attrs(tail).items():
+                    attrs.setdefault(k, v)
+            m = re.match(r'^(.+?)\s*([+-])\s*(.+)$', name_part.strip())
             if not m: return None
-            character = m.group(1).strip(); op = m.group(2); ability = m.group(3).strip()
+            character = clean_entity_name(m.group(1), max_len=60); op = m.group(2)
+            ability = clean_entity_name(m.group(3))
             if not character or not ability: return None
             return {"type": "ABILITY_UPDATE", "character": character, "add": op == "+", "ability": ability, "description": attrs.get("description", "")}
 
