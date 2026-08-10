@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from database import db, LEGACY_USER_ID
+import db_ext
 from core.auth import hash_password, verify_password, make_token, get_user_by_token
 from core.prompt_assembler import PromptAssembler
 from core.state_resolver import resolve_state
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.0.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -81,13 +82,6 @@ class StoryCreateRequest(BaseModel):
     isPublic: bool = True
     client_telemetry: Optional[dict] = None
 
-class StoryUpdateRequest(BaseModel):
-    title: str
-    genre: str
-    premise: str
-    isPublic: bool = True
-    client_telemetry: Optional[dict] = None
-
 class AuthRequest(BaseModel):
     username: str
     password: str
@@ -104,6 +98,9 @@ class NoteCreateRequest(BaseModel):
 
 class VisibilityRequest(BaseModel):
     is_public: bool
+
+class ArtUpdateRequest(BaseModel):
+    image: str = ""
 
 router = APIRouter(prefix="/api")
 
@@ -218,6 +215,12 @@ def list_stories(raw: Request, scope: str = "all"):
         return db.list_stories_for_user(user["id"])
     return db.list_all_stories(user["id"])
 
+# NOTE: declared BEFORE /stories/{story_id} so "art" is not captured as a story id.
+@router.get("/stories/art")
+def stories_art(raw: Request):
+    user = require_user(raw)
+    return db_ext.get_all_story_art()
+
 @router.get("/playthroughs")
 def list_playthroughs(raw: Request):
     user = require_user(raw)
@@ -258,6 +261,46 @@ def get_inventory(playthrough_id: str, raw: Request):
         abilities[c["id"]] = ab if isinstance(ab, list) else []
     return {"items": items, "equipment": equipment, "backpacks": backpacks, "bonuses": bonuses, "abilities": abilities}
 
+@router.get("/playthroughs/{playthrough_id}/world-nodes")
+def get_world_nodes_route(playthrough_id: str, raw: Request):
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    return db_ext.get_world_nodes_full(playthrough_id)
+
+@router.get("/playthroughs/{playthrough_id}/world-events")
+def get_world_events_route(playthrough_id: str, raw: Request, limit: int = 20):
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    return db_ext.get_recent_world_events(playthrough_id, min(max(int(limit), 1), 50))
+
+@router.post("/playthroughs/{playthrough_id}/compress")
+def compress_memory(playthrough_id: str, raw: Request):
+    from zai import ZaiClient
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    msgs = db.get_playthrough_messages(playthrough_id, limit=200)
+    if len(msgs) <= 50:
+        return {"status": "skipped", "reason": "not_enough_messages", "count": len(msgs)}
+    oldest = msgs[:40]
+    transcript = "\n".join(f"{m['role']}: {m['content']}" for m in oldest)
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="ZAI_API_KEY missing.")
+    client = ZaiClient(api_key=API_KEY)
+    resp = call_with_retry(
+        lambda: client.chat.completions.create(
+            model="glm-4.5-flash",
+            messages=[
+                {"role": "system", "content": "Summarize this RPG chapter chronicle into a compact memory (max 250 words). Keep names, places, outcomes and relationships."},
+                {"role": "user", "content": transcript},
+            ],
+            max_tokens=600, temperature=0.3),
+        max_attempts=2, label="compress")
+    summary = (resp.choices[0].message.content or "").strip()
+    if not summary:
+        raise HTTPException(status_code=502, detail="Summarizer returned empty text.")
+    db_ext.set_memory_summary(playthrough_id, summary)
+    return {"status": "compressed", "messages": len(msgs)}
+
 @router.post("/playthroughs/{playthrough_id}/equip")
 def equip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     user = require_user(raw)
@@ -289,13 +332,7 @@ def use_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     res = db.use_item(playthrough_id, char_id, req.item_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not use item."))
-    
-    # PHASE 6: Consumable AI Nudge
-    item_name = res.get("name", "an item")
-    nudge = f"[SYSTEM DIRECTIVE: The player just consumed/used '{item_name}'. Narrate the immediate physical sensation, the visual effect, and apply appropriate [STAT_UPDATE] tags (e.g., restoring Health/Mana). Do not advance the plot until the effect is resolved.]"
-    db.set_active_nudge(playthrough_id, nudge)
-    
-    return {"status": "used", "name": item_name}
+    return {"status": "used", "name": res.get("name")}
 
 @router.post("/playthroughs/{playthrough_id}/drop")
 def drop_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
@@ -315,46 +352,6 @@ def complete_playthrough(playthrough_id: str, raw: Request):
     db.complete_playthrough(playthrough_id)
     return {"status": "completed"}
 
-@router.post("/playthroughs/{playthrough_id}/compress")
-async def compress_memory(playthrough_id: str, raw: Request):
-    from zai import ZaiClient
-    user = require_user(raw)
-    require_own_playthrough(playthrough_id, user)
-    
-    msgs = db.get_playthrough_messages(playthrough_id, limit=100)
-    if len(msgs) < 60:
-        return {"status": "skipped", "reason": "not_enough_messages"}
-        
-    to_summarize = msgs[:40]
-    text_to_summarize = "\n".join([f"{m['role']}: {m['content']}" for m in to_summarize])
-    existing_memory = db.get_memory_summary(playthrough_id)
-    
-    prompt = f"""You are a master archivist. Compress the following RPG story transcript into a concise, dense "Chapter Summary" that preserves key plot points, NPC relationships, and unresolved mysteries. 
-If there is an existing summary, append the new events to it seamlessly.
-Existing Summary: {existing_memory or 'None'}
-
-New Transcript to Compress:
-{text_to_summarize}
-
-Output ONLY the updated, combined summary. No meta-commentary."""
-
-    client = ZaiClient(api_key=API_KEY) if API_KEY else None
-    if not client: return {"status": "error", "reason": "no_api_key"}
-    
-    try:
-        response = client.chat.completions.create(
-            model="glm-4.5-flash", 
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=2048,
-            temperature=0.3
-        )
-        summary = response.choices[0].message.content.strip()
-        db.update_memory_summary(playthrough_id, summary)
-        return {"status": "compressed", "chars": len(summary)}
-    except Exception as e:
-        logger.error(f"Compression failed: {e}")
-        return {"status": "error", "reason": str(e)}
-
 @router.get("/stories/{story_id}")
 def get_story_detail(story_id: str, raw: Request):
     user = require_user(raw)
@@ -362,6 +359,21 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
     return {"story": story, "characters": db.get_story_characters(story_id)}
+
+@router.post("/stories/{story_id}/art")
+def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    require_story_owner(story, user)
+    image = req.image or ""
+    if len(image) > 900_000:
+        raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
+    if image and not image.startswith("data:image"):
+        raise HTTPException(status_code=400, detail="Unsupported image format.")
+    if not db_ext.set_story_art(story_id, image):
+        raise HTTPException(status_code=500, detail="Could not save the picture. Try again.")
+    return {"status": "updated"}
 
 @router.get("/stories/{story_id}/messages")
 def get_story_messages(story_id: str, raw: Request, limit: int = 50, base_only: bool = True):
@@ -421,15 +433,6 @@ def set_visibility(story_id: str, req: VisibilityRequest, raw: Request):
     db.set_story_visibility(story_id, req.is_public)
     return {"status": "updated", "is_public": req.is_public}
 
-@router.patch("/stories/{story_id}")
-def update_story_details(story_id: str, req: StoryUpdateRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
-    db.update_story_metadata(story_id, req.title, req.genre, req.premise, req.isPublic)
-    return {"story_id": story_id, "status": "updated", "title": req.title}
-
 @router.post("/stories/{story_id}/play")
 def play_story(story_id: str, raw: Request):
     user = require_user(raw)
@@ -474,11 +477,7 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
     if not _recent_duplicate(db.get_last_playthrough_message(pid), request.user_action):
         db.add_playthrough_message(story_id, pid, "user", request.user_action, msg_type="action", telemetry=telemetry)
 
-    # PHASE 6: Dynamic Context Allocation
-    model = request.model
-    max_chars = 150000 if "nova" in model.lower() or "glm-4.7" in model else 40000
-    
-    assembler = PromptAssembler(pid, max_chars=max_chars)
+    assembler = PromptAssembler(pid)
     system_prompt = assembler.assemble_full_prompt(request.user_action)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None

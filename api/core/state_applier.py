@@ -9,6 +9,7 @@ for _p in (PARENT_DIR, BASE_DIR):
         sys.path.insert(0, _p)
 
 from database import db
+import db_ext
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,21 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                     applied.append(update)
                 else:
                     rejected.append({**update, "reason": "backpack_error"})
+
+            elif utype == "WORLD_STATE_UPDATE":
+                res = db_ext.update_world_node_state(playthrough_id, update["name"], update)
+                if res.get("ok"):
+                    applied.append(update)
+                else:
+                    rejected.append({**update, "reason": res.get("reason", "world_error")})
+
+            elif utype == "WORLD_EVENT":
+                pt = db.get_playthrough(playthrough_id)
+                day = pt["current_day"] if pt else 1
+                if db_ext.record_world_event(playthrough_id, update["name"], update.get("event_type", "event"), update.get("description", ""), day):
+                    applied.append(update)
+                else:
+                    rejected.append({**update, "reason": "event_error"})
 
             elif utype == "SAGA_END":
                 db.complete_playthrough(playthrough_id)

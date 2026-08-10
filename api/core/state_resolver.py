@@ -13,9 +13,11 @@ def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
       [ITEM_UPDATE: CharacterName - ItemName]
       [ABILITY_UPDATE: CharacterName + Ability Name | desc=...]
       [BAG_UPDATE: CharacterName level N]
+      [WORLD_STATE_UPDATE: EntityName | kind=..., status=..., relationship=+N, power=N, wealth=N, is_alive=..., allegiance=...]
+      [WORLD_EVENT: EntityName | type=war|politics|economy|personal, desc=...]
       [SAGA_END]
     """
-    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|SAGA_END):\s*([^\]]*)\]'
+    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|WORLD_STATE_UPDATE|WORLD_EVENT|SAGA_END):\s*([^\]]*)\]'
     updates = []
 
     def replacer(match):
@@ -52,6 +54,8 @@ def _parse_attrs(raw: str) -> Dict[str, Any]:
     if "slot" in out: typed["slot"] = out["slot"].lower()
     if "rarity" in out: typed["rarity"] = out["rarity"].lower()
     if "description" in out: typed["description"] = out["description"]
+    for passthrough in ("status", "allegiance", "kind", "is_alive", "relationship", "power", "wealth"):
+        if passthrough in out: typed[passthrough] = out[passthrough]
     try:
         if "level" in out: typed["level"] = int(float(out["level"]))
     except Exception:
@@ -132,6 +136,32 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             character = m.group(1).strip(); level = int(m.group(2))
             if not character: return None
             return {"type": "BAG_UPDATE", "character": character, "level": level}
+
+        elif tag_type == "WORLD_STATE_UPDATE":
+            main_part = payload
+            attrs = {}
+            if "|" in payload:
+                main_part, attr_part = payload.split("|", 1)
+                attrs = _parse_attrs(attr_part)
+            name = main_part.strip()
+            if not name: return None
+            u = {"type": "WORLD_STATE_UPDATE", "name": name}
+            for k in ("status", "allegiance", "kind", "relationship", "power", "wealth"):
+                if k in attrs: u[k] = attrs[k]
+            if "is_alive" in attrs:
+                u["is_alive"] = str(attrs["is_alive"]).lower() in ("true", "1", "yes", "alive")
+            return u
+
+        elif tag_type == "WORLD_EVENT":
+            main_part = payload
+            attrs = {}
+            if "|" in payload:
+                main_part, attr_part = payload.split("|", 1)
+                attrs = _parse_attrs(attr_part)
+            name = main_part.strip() or "The World"
+            return {"type": "WORLD_EVENT", "name": name,
+                    "event_type": attrs.get("type", "event"),
+                    "description": attrs.get("description", "")}
 
         elif tag_type == "SAGA_END":
             return {"type": "SAGA_END"}

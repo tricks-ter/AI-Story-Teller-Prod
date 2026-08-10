@@ -1,13 +1,15 @@
 import React, { useState } from "react";
-import { Heart, Sparkles, MapPin, Backpack, Map as MapIcon, UserRound } from "lucide-react";
+import { Heart, Sparkles, MapPin, Backpack, Map as MapIcon, UserRound, ScrollText } from "lucide-react";
 import InventoryPanel from "./InventoryPanel";
 import StoryMap from "./StoryMap";
 import CharacterSheet from "./CharacterSheet";
+import WorldCodex from "./WorldCodex";
 
 export default function HUD({ storyContext }) {
   const [invOpen, setInvOpen] = useState(false);
   const [mapOpen, setMapOpen] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [codexOpen, setCodexOpen] = useState(false);
 
   if (!storyContext || !storyContext.characters) return null;
 
@@ -65,6 +67,9 @@ export default function HUD({ storyContext }) {
         </div>
 
         <div className="flex items-center gap-1 ml-auto">
+          <button onClick={() => setCodexOpen(true)} className="flex items-center justify-center text-amber-300 min-w-[44px] min-h-[44px] rounded-xl hover:bg-gray-700/50 touch-manipulation active:scale-95" title="World codex">
+            <ScrollText size={15} />
+          </button>
           <button onClick={() => setSheetOpen(true)} className="flex items-center justify-center text-purple-300 min-w-[44px] min-h-[44px] rounded-xl hover:bg-gray-700/50 touch-manipulation active:scale-95" title="Character sheet">
             <UserRound size={15} />
           </button>
@@ -81,6 +86,7 @@ export default function HUD({ storyContext }) {
       {invOpen && <InventoryPanel playthroughId={storyContext.playthrough_id} characters={storyContext.characters} onClose={() => setInvOpen(false)} />}
       {mapOpen && <StoryMap playthroughId={storyContext.playthrough_id} onClose={() => setMapOpen(false)} />}
       {sheetOpen && <CharacterSheet storyContext={storyContext} onClose={() => setSheetOpen(false)} />}
+      {codexOpen && <WorldCodex playthroughId={storyContext.playthrough_id} onClose={() => setCodexOpen(false)} />}
     </>
   );
 }
