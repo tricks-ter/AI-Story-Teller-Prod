@@ -171,3 +171,4 @@ narrated effect; N+1 queries in prompt assembly (perf note); no library search/f
 4. Append a section-9 entry.
 5. Verify with user-facing checklists (Actions tab green, in-app behaviors).
 - Phase 6 UI (additive): OOC-style library feed (featured banner, chips, Recently Played, Top Ranked, search) + Story Information page (cover/tags/stats/descriptions/cast/prologue preview, sticky Continue/New Session) + owner art uploads (story cover + NPC portraits) stored in DB via migration 0011_story_art.sql; new endpoints /art/stories, /stories/{id}/art, /stories/{id}/characters/{cid}/art, /stories/{id}/cast with pre-migration fallbacks; all prior functions preserved.
+- Phase 6 Fix Resolved React Hook violation in StoryLibrary (moved infoTab to top level) that caused blank page on story click. Added Story Edit mode (PATCH /stories/{id}) and integrated StoryCreator with edit state.

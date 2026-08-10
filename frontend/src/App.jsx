@@ -32,6 +32,7 @@ export default function App() {
   const [notice, setNotice] = useState(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [settings, setSettings] = useState(loadSettings);
+  const [editingStory, setEditingStory] = useState(null);
   const stopRef = useRef(null);
 
   useEffect(() => { setSessions(listSessions()); }, []);
@@ -162,6 +163,31 @@ export default function App() {
     } catch (err) {
       console.error("Failed to create story", err);
       setError(describeNetworkError(err));
+      setView("library");
+    }
+  };
+
+  const handleUpdateStory = async (storyId, storyData) => {
+    try {
+      const enriched = await withTelemetry({
+        title: storyData.title,
+        genre: storyData.genre,
+        premise: storyData.premise,
+        isPublic: true 
+      });
+      const res = await fetch(`${BASE_URL}/stories/${storyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(enriched)
+      });
+      const data = await parseJsonSafe(res);
+      if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
+      setEditingStory(null);
+      setView("library");
+    } catch (err) {
+      console.error("Failed to update story", err);
+      setError(describeNetworkError(err));
+      setEditingStory(null);
       setView("library");
     }
   };
@@ -310,8 +336,9 @@ export default function App() {
 
   if (view === "landing") return <LandingPage onSelectChat={() => requireAuth("chat")} onSelectStory={() => requireAuth("story")} user={user} onSignIn={() => { setPendingAction(null); setView("auth"); }} onLogout={handleLogout} />;
   if (view === "auth") return <AuthPage onAuthed={handleAuthed} onBack={() => setView("landing")} />;
-  if (view === "library") return <StoryLibrary user={user} onOpenStory={handleOpenStory} onNewStory={() => setView("storySetup")} onBack={() => setView("landing")} />;
+  if (view === "library") return <StoryLibrary user={user} onOpenStory={handleOpenStory} onNewStory={() => setView("storySetup")} onEditStory={(s) => { setEditingStory(s); setView("storyEdit"); }} onBack={() => setView("landing")} />;
   if (view === "storySetup") return <StoryCreator onStart={handleStartStory} onBack={() => setView("library")} />;
+  if (view === "storyEdit") return <StoryCreator initialData={editingStory} isEditing={true} onUpdate={handleUpdateStory} onBack={() => { setEditingStory(null); setView("library"); }} />;
 
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">

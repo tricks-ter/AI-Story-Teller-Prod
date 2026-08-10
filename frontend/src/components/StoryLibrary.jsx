@@ -37,7 +37,7 @@ function Cover({ src, title, genre, className, textClass }) {
   );
 }
 
-export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) {
+export default function StoryLibrary({ user, onOpenStory, onNewStory, onEditStory, onBack }) {
   const [tab, setTab] = useState('all');
   const [allStories, setAllStories] = useState(null);
   const [myStories, setMyStories] = useState(null);
@@ -64,6 +64,9 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const [sessionMsg, setSessionMsg] = useState(null);
   const fileRef = useRef(null);
 
+  // FIX: Moved useState for infoTab to top level to prevent React Hook violation (Rule 1 & 7)
+  const [infoTab, setInfoTab] = useState('info');
+
   const load = useCallback(async () => {
     setError(null);
     const controller = new AbortController();
@@ -89,7 +92,7 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
           const res = r.value;
           const data = await parseJsonSafe(res);
           if (res.ok) {
-            setters[i](Array.isArray(data) ? data : []);
+            setters[i](data ? data : []);
           } else {
             setters[i]([]);
             errs.push(`${names[i]}: ${friendlyHttp(res.status, data?.detail)}`);
@@ -316,7 +319,6 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
     const coverSrc = detail?.story?.cover_image || artMap[selectedStory.id]?.cover_image || '';
     const storyMeta = detail?.story?.metadata || {};
     const storyDesc = storyMeta.rules || storyMeta.system_prompt || selectedStory.premise;
-    const [infoTab, setInfoTab] = useState('info');
 
     return (
       <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">
@@ -330,10 +332,15 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
             <h2 className="text-sm font-semibold text-white truncate">Story Information</h2>
           </div>
           {isOwner && detail && (
-            <button onClick={toggleVisibility} className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs min-h-[44px] touch-manipulation" title={isPublic ? 'Make private' : 'Make public'}>
-              {isPublic ? <Eye size={14} /> : <EyeOff size={14} />}
-              {isPublic ? 'Public' : 'Private'}
-            </button>
+            <>
+              <button onClick={() => { setSelectedStory(null); onEditStory && onEditStory(detail.story); }} className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs min-h-[44px] touch-manipulation">
+                Edit
+              </button>
+              <button onClick={toggleVisibility} className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs min-h-[44px] touch-manipulation" title={isPublic ? 'Make private' : 'Make public'}>
+                {isPublic ? <Eye size={14} /> : <EyeOff size={14} />}
+                {isPublic ? 'Public' : 'Private'}
+              </button>
+            </>
           )}
         </header>
 

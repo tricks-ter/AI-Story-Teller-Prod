@@ -882,3 +882,15 @@ def get_cast_with_images(story_id):
     if rows is None:  # pre-migration fallback
         return db.get_story_characters(story_id)
     return [dict(r, image=r.get("image") or "") for r in rows]
+
+    def update_story_metadata(self, story_id, title, genre, premise, is_public):
+        try:
+            self.execute_query(
+                "UPDATE stories SET title = %s, genre = %s, premise = %s, is_public = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (title, genre, premise, bool(is_public), story_id),
+                fetch="none", commit=True)
+        except Exception:
+            self.execute_query(
+                "UPDATE stories SET title = %s, genre = %s, premise = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (title, genre, premise, story_id),
+                fetch="none", commit=True)
