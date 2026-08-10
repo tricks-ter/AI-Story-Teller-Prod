@@ -13,7 +13,7 @@ def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
       [ITEM_UPDATE: CharacterName - ItemName]
       [ABILITY_UPDATE: CharacterName + Ability Name | desc=...]
       [BAG_UPDATE: CharacterName level N]
-      [WORLD_STATE_UPDATE: EntityName | kind=..., status=..., relationship=+N, power=N, wealth=N, is_alive=..., allegiance=...]
+      [WORLD_STATE_UPDATE: EntityName | kind=..., parent=..., status=..., relationship=+N, power=N, wealth=N, is_alive=..., allegiance=..., desc=...]
       [WORLD_EVENT: EntityName | type=war|politics|economy|personal, desc=...]
       [SAGA_END]
     """
@@ -54,7 +54,7 @@ def _parse_attrs(raw: str) -> Dict[str, Any]:
     if "slot" in out: typed["slot"] = out["slot"].lower()
     if "rarity" in out: typed["rarity"] = out["rarity"].lower()
     if "description" in out: typed["description"] = out["description"]
-    for passthrough in ("status", "allegiance", "kind", "is_alive", "relationship", "power", "wealth"):
+    for passthrough in ("status", "allegiance", "kind", "is_alive", "relationship", "power", "wealth", "parent"):
         if passthrough in out: typed[passthrough] = out[passthrough]
     try:
         if "level" in out: typed["level"] = int(float(out["level"]))
@@ -83,8 +83,10 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             if "=" in payload:
                 left, right = payload.split("=", 1)
                 char_stat = left.strip()
-                value = float(right.strip())
-                is_delta = False
+                right_s = right.strip()
+                # CRITICAL FIX: "= -10" / "= +5" are DELTAS, not absolute sets.
+                is_delta = right_s.startswith(("+", "-"))
+                value = float(right_s)
             else:
                 m = re.match(r'([\w\s\.]+)\s+([+-]?\d+(?:\.\d+)?)$', payload)
                 if not m: return None
@@ -146,7 +148,7 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             name = main_part.strip()
             if not name: return None
             u = {"type": "WORLD_STATE_UPDATE", "name": name}
-            for k in ("status", "allegiance", "kind", "relationship", "power", "wealth"):
+            for k in ("status", "allegiance", "kind", "relationship", "power", "wealth", "parent", "description"):
                 if k in attrs: u[k] = attrs[k]
             if "is_alive" in attrs:
                 u["is_alive"] = str(attrs["is_alive"]).lower() in ("true", "1", "yes", "alive")

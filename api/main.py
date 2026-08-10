@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.1.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.3.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -82,6 +82,13 @@ class StoryCreateRequest(BaseModel):
     isPublic: bool = True
     client_telemetry: Optional[dict] = None
 
+class StoryUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    genre: Optional[str] = None
+    premise: Optional[str] = None
+    cover_image: Optional[str] = None
+    banner_image: Optional[str] = None
+
 class AuthRequest(BaseModel):
     username: str
     password: str
@@ -101,6 +108,7 @@ class VisibilityRequest(BaseModel):
 
 class ArtUpdateRequest(BaseModel):
     image: str = ""
+    banner: str = ""
 
 router = APIRouter(prefix="/api")
 
@@ -246,6 +254,7 @@ def get_map(playthrough_id: str, raw: Request):
 def get_inventory(playthrough_id: str, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
+    db_ext.dedupe_stackables(playthrough_id)  # self-healing: merge duplicate coins/materials
     db.ensure_playthrough_inventory(playthrough_id)
     items = db.list_playthrough_items(playthrough_id)
     equipment = db.list_playthrough_equipment(playthrough_id)
@@ -360,19 +369,55 @@ def get_story_detail(story_id: str, raw: Request):
     check_story_access(story, user)
     return {"story": story, "characters": db.get_story_characters(story_id)}
 
+@router.patch("/stories/{story_id}")
+def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+    fields = {}
+    if req.title is not None:
+        t = req.title.strip()
+        if not t: raise HTTPException(status_code=400, detail="Title can't be empty")
+        fields["title"] = t[:120]
+    if req.genre is not None:
+        g = req.genre.strip()
+        if g: fields["genre"] = g[:60]
+    if req.premise is not None:
+        p = req.premise.strip()
+        if p: fields["premise"] = p[:2000]
+    if req.cover_image is not None:
+        if len(req.cover_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
+        fields["cover_image"] = req.cover_image
+    if req.banner_image is not None:
+        if len(req.banner_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
+        fields["banner_image"] = req.banner_image
+    if not fields:
+        return {"status": "nothing_to_update"}
+    if not db_ext.update_story_fields(story_id, fields):
+        raise HTTPException(status_code=500, detail="Could not save changes. Try again.")
+    return {"status": "updated", "fields": list(fields.keys())}
+
 @router.post("/stories/{story_id}/art")
 def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
-    if len(image) > 900_000:
+    banner = req.banner or ""
+    if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
         raise HTTPException(status_code=400, detail="Unsupported image format.")
-    if not db_ext.set_story_art(story_id, image):
+    if banner and not banner.startswith("data:image"):
+        raise HTTPException(status_code=400, detail="Unsupported image format.")
+    if image and not db_ext.set_story_art(story_id, image):
         raise HTTPException(status_code=500, detail="Could not save the picture. Try again.")
+    if banner and not db_ext.set_story_banner(story_id, banner):
+        raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
     return {"status": "updated"}
 
 @router.get("/stories/{story_id}/messages")

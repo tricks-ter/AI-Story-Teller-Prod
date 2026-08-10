@@ -13,6 +13,8 @@ import db_ext
 
 logger = logging.getLogger(__name__)
 
+STACKABLE_TYPES = {"consumable", "material"}
+
 def apply_state_updates(playthrough_id: str, updates: list) -> dict:
     applied = []
     rejected = []
@@ -27,6 +29,7 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                 char_name = update["character"]
                 stat_name = update["stat"]
                 new_value = update["value"]
+                # CRITICAL: Always treat as delta if is_delta is True
                 if update.get("is_delta", False):
                     chars = db.get_playthrough_characters(playthrough_id)
                     current = None
@@ -43,6 +46,9 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
             elif utype == "LOCATION_UPDATE":
                 if db.upsert_playthrough_location(playthrough_id, update["location"], update.get("description", "")):
                     applied.append(update)
+                    # Persist every discovered place in the world graph
+                    db_ext.ensure_world_node(playthrough_id, update["location"], kind="settlement",
+                                             description=update.get("description", ""))
                 else:
                     rejected.append({**update, "reason": "location_error"})
 
@@ -51,7 +57,15 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                 if not char_id:
                     rejected.append({**update, "reason": "character_not_found"}); continue
                 if update.get("add", True):
-                    res = db.grant_playthrough_item(playthrough_id, char_id, update["item"], update.get("attrs") or {})
+                    attrs = update.get("attrs") or {}
+                    new_type = str(attrs.get("type") or "").lower()
+                    # DUPLICATE FIX: if the character already carries this stackable item, bump quantity.
+                    existing = db_ext.find_stackable_item(playthrough_id, char_id, update["item"])
+                    if existing and existing["item_type"] in STACKABLE_TYPES and new_type in ("", "consumable", "material"):
+                        db_ext.bump_item_quantity(playthrough_id, existing["id"], 1)
+                        applied.append(update)
+                        continue
+                    res = db.grant_playthrough_item(playthrough_id, char_id, update["item"], attrs)
                     if res.get("ok"): applied.append(update)
                     else: rejected.append({**update, "reason": res.get("reason", "rejected")})
                 else:

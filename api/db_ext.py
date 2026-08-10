@@ -1,15 +1,17 @@
-"""Phase 7B additive module: story art + living-world state + event ledger.
+"""Phase 7B additive module: story art, story metadata edits, living-world state,
+world event ledger, inventory dedupe/stacking, memory summaries.
 Kept separate from database.py to stay purely additive (no rewrite risk)."""
 import json
 import uuid
 import logging
-from database import db
+from database import db, LEGACY_USER_ID
 
 logger = logging.getLogger(__name__)
 
 VALID_NODE_TYPES = {"region", "faction", "settlement", "location", "npc", "item", "economy_state"}
+STACKABLE_TYPES = {"consumable", "material"}
 
-# ── Story Art ──
+# ── Story Art & Metadata ──
 def set_story_art(story_id, cover_image):
     try:
         db.execute_query(
@@ -20,10 +22,20 @@ def set_story_art(story_id, cover_image):
         logger.error(f"set_story_art failed: {e}")
         return False
 
+def set_story_banner(story_id, banner_image):
+    try:
+        db.execute_query(
+            "UPDATE stories SET banner_image = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (banner_image or "", story_id), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"set_story_banner failed: {e}")
+        return False
+
 def get_all_story_art():
     try:
-        rows = db.execute_query("SELECT id, cover_image FROM stories WHERE COALESCE(cover_image, '') <> ''") or []
-        return {r["id"]: r["cover_image"] for r in rows}
+        rows = db.execute_query("SELECT id, cover_image, banner_image FROM stories WHERE COALESCE(cover_image, '') <> '' OR COALESCE(banner_image, '') <> ''") or []
+        return {r["id"]: {"cover": r["cover_image"], "banner": r["banner_image"]} for r in rows}
     except Exception:
         return {}
 
@@ -37,6 +49,72 @@ def get_cast_with_images(story_id):
         "SELECT id, name, role, image FROM story_characters WHERE story_id = %s "
         "ORDER BY is_player DESC, created_at ASC", (story_id,), fetch="all") or []
 
+def can_manage_story(story, user_id):
+    """Owner — or anyone may adopt a legacy (pre-auth) story."""
+    owner = story.get("creator_id")
+    return owner == user_id or owner in (None, "", LEGACY_USER_ID)
+
+def update_story_fields(story_id, fields):
+    allowed = {"title", "genre", "premise", "cover_image", "banner_image"}
+    sets, params = [], []
+    for k, v in (fields or {}).items():
+        if k in allowed and v is not None:
+            sets.append(f"{k} = %s"); params.append(str(v))
+    if not sets: return False
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(story_id)
+    db.execute_query(f"UPDATE stories SET {', '.join(sets)} WHERE id = %s",
+                     tuple(params), fetch="none", commit=True)
+    return True
+
+# ── Inventory: stacking & self-healing dedupe ──
+def find_stackable_item(playthrough_id, character_id, name):
+    return db.execute_query(
+        "SELECT id, quantity, item_type FROM playthrough_items "
+        "WHERE playthrough_id = %s AND character_id = %s AND LOWER(name) = LOWER(%s) "
+        "ORDER BY created_at ASC LIMIT 1",
+        (playthrough_id, character_id, name), fetch="one")
+
+def bump_item_quantity(playthrough_id, item_id, qty=1):
+    db.execute_query(
+        "UPDATE playthrough_items SET quantity = LEAST(9999, quantity + %s), updated_at = CURRENT_TIMESTAMP "
+        "WHERE id = %s", (int(qty), item_id), fetch="none", commit=True)
+    return True
+
+def dedupe_stackables(playthrough_id):
+    """Merge duplicate stackable rows (same character + name). Idempotent & cheap."""
+    try:
+        def fn(cur):
+            cur.execute(
+                "SELECT character_id, LOWER(name) AS lname FROM playthrough_items "
+                "WHERE playthrough_id = %s AND item_type IN ('consumable','material') "
+                "GROUP BY character_id, LOWER(name) HAVING COUNT(*) > 1",
+                (playthrough_id,))
+            dups = cur.fetchall() or []
+            merged = 0
+            for d in dups:
+                cur.execute(
+                    "SELECT id, quantity FROM playthrough_items "
+                    "WHERE playthrough_id = %s AND character_id = %s AND LOWER(name) = %s "
+                    "ORDER BY created_at ASC",
+                    (playthrough_id, d["character_id"], d["lname"]))
+                rows = cur.fetchall() or []
+                if len(rows) < 2: continue
+                keep = rows[0]
+                total = sum(int(r["quantity"]) for r in rows)
+                cur.execute(
+                    "UPDATE playthrough_items SET quantity = LEAST(9999, %s), updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (total, keep["id"]))
+                for r in rows[1:]:
+                    cur.execute("DELETE FROM playthrough_equipment WHERE item_id = %s", (r["id"],))
+                    cur.execute("DELETE FROM playthrough_items WHERE id = %s", (r["id"],))
+                merged += 1
+            return merged
+        return db._with_conn(fn, commit=True) or 0
+    except Exception as e:
+        logger.error(f"dedupe_stackables failed: {e}")
+        return 0
+
 # ── Living World: nodes with state ──
 def get_world_nodes_full(playthrough_id):
     try:
@@ -47,27 +125,81 @@ def get_world_nodes_full(playthrough_id):
     except Exception:
         return db.get_world_nodes(playthrough_id)
 
+def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
+    """Create-if-missing so map/world stays persistent. Never overwrites state."""
+    try:
+        def fn(cur):
+            cur.execute(
+                "SELECT id, metadata FROM world_nodes WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
+                (playthrough_id, name))
+            row = cur.fetchone()
+            if row:
+                meta = row["metadata"] if isinstance(row["metadata"], dict) else {}
+                if description and not meta.get("description"):
+                    meta["description"] = description
+                    cur.execute("UPDATE world_nodes SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                                (json.dumps(meta), row["id"]))
+                return row["id"]
+            ntype = kind if kind in VALID_NODE_TYPES else "settlement"
+            new_id = str(uuid.uuid4())
+            meta = {"description": description or ""}
+            cur.execute(
+                "INSERT INTO world_nodes (id, playthrough_id, parent_id, node_type, name, metadata, "
+                "status, is_alive, relationship, wealth, power, allegiance, created_at, updated_at) "
+                "VALUES (%s, %s, NULL, %s, %s, %s, 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (new_id, playthrough_id, ntype, name, json.dumps(meta)))
+            return new_id
+        return db._with_conn(fn, commit=True)
+    except Exception as e:
+        logger.error(f"ensure_world_node failed: {e}")
+        return None
+
 def update_world_node_state(playthrough_id, node_name, updates):
     """Upsert an entity and apply state changes. Signed values = deltas."""
     try:
         def fn(cur):
             cur.execute(
-                "SELECT id, node_type, relationship, wealth, power FROM world_nodes "
+                "SELECT id, node_type, parent_id, metadata, relationship, wealth, power FROM world_nodes "
                 "WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
                 (playthrough_id, node_name))
             row = cur.fetchone()
+
+            # Resolve optional parent (hierarchy: city -> building / npc)
+            parent_id = None
+            if updates.get("parent"):
+                pname = str(updates["parent"]).strip()
+                cur.execute(
+                    "SELECT id FROM world_nodes WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
+                    (playthrough_id, pname))
+                prow = cur.fetchone()
+                if prow:
+                    parent_id = prow["id"]
+                else:
+                    pid = str(uuid.uuid4())
+                    cur.execute(
+                        "INSERT INTO world_nodes (id, playthrough_id, parent_id, node_type, name, metadata, "
+                        "status, is_alive, relationship, wealth, power, allegiance, created_at, updated_at) "
+                        "VALUES (%s, %s, NULL, 'settlement', %s, '{}', 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                        (pid, playthrough_id, pname))
+                    parent_id = pid
+
             created = False
             if not row:
                 kind = str(updates.get("kind", "")).lower()
+                if kind in ("kingdom",): kind = "region"
+                if kind in ("family", "house"): kind = "faction"
+                if kind in ("building", "shop", "inn", "tavern", "temple", "market"): kind = "location"
+                if kind in ("city", "town", "village"): kind = "settlement"
                 if kind not in VALID_NODE_TYPES:
                     kind = "npc" if (updates.get("is_alive") is not None or updates.get("relationship") is not None) else "faction"
                 new_id = str(uuid.uuid4())
+                meta = {"description": updates.get("description", "") or ""}
                 cur.execute(
                     "INSERT INTO world_nodes (id, playthrough_id, parent_id, node_type, name, metadata, "
                     "status, is_alive, relationship, wealth, power, allegiance, created_at, updated_at) "
-                    "VALUES (%s, %s, NULL, %s, %s, '{}', 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                    (new_id, playthrough_id, kind, node_name))
-                row = {"id": new_id, "relationship": 0, "wealth": 0, "power": 50}
+                    "VALUES (%s, %s, %s, %s, %s, %s, 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (new_id, playthrough_id, parent_id, kind, node_name, json.dumps(meta)))
+                row = {"id": new_id, "parent_id": parent_id, "relationship": 0, "wealth": 0, "power": 50, "metadata": meta}
                 created = True
 
             sets, params = [], []
@@ -77,6 +209,8 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 sets.append("allegiance = %s"); params.append(str(updates["allegiance"])[:255])
             if "is_alive" in updates and updates["is_alive"] is not None:
                 sets.append("is_alive = %s"); params.append(bool(updates["is_alive"]))
+            if parent_id and not row.get("parent_id"):
+                sets.append("parent_id = %s"); params.append(parent_id)
             for k in ("relationship", "power", "wealth"):
                 raw = updates.get(k)
                 if raw in (None, ""):
@@ -98,6 +232,16 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 sets.append("updated_at = CURRENT_TIMESTAMP")
                 params.append(row["id"])
                 cur.execute(f"UPDATE world_nodes SET {', '.join(sets)} WHERE id = %s", tuple(params))
+
+            # Fill description only when empty (first chronicle wins)
+            if updates.get("description"):
+                cur.execute("SELECT metadata FROM world_nodes WHERE id = %s", (row["id"],))
+                mrow = cur.fetchone()
+                meta = mrow["metadata"] if mrow and isinstance(mrow["metadata"], dict) else {}
+                if not meta.get("description"):
+                    meta["description"] = updates["description"]
+                    cur.execute("UPDATE world_nodes SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                                (json.dumps(meta), row["id"]))
             return {"ok": True, "created": created}
         return db._with_conn(fn, commit=True) or {"ok": False, "reason": "db_error"}
     except Exception as e:
