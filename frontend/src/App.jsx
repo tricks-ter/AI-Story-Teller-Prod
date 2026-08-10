@@ -13,6 +13,10 @@ import { streamChat, streamStory, completePlaythrough } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
 
+// LOCAL DB IMPORTS
+import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPlaythrough, saveLocalPlaythrough, getLocalMessages, saveLocalMessages } from "./utils/localDb";
+import { syncQueue } from "./utils/syncQueue";
+
 export default function App() {
   const [view, setView] = useState("landing");
   const [storyContext, setStoryContext] = useState(null);
@@ -38,9 +42,22 @@ export default function App() {
   useEffect(() => { setSessions(listSessions()); }, []);
   useEffect(() => { saveSettings(settings); }, [settings]);
   useEffect(() => { fetch(`${BASE_URL}/health`).catch(() => {}); }, []);
+  
   useEffect(() => {
     if (getToken()) {
-      fetchMe().then(u => { if (u) setUser(u); else { clearAuth(); setUser(null); } });
+      // HOT DATA: Hydrate user instantly from IndexedDB before network resolves
+      getLocalUser().then(localU => { if (localU && !user) setUser(localU); });
+
+      fetchMe().then(u => { 
+        if (u) {
+          setUser(u); 
+          saveLocalUser(u); // Warm update
+          syncQueue.enqueue('SYNC_LIBRARY', { userId: u.id }); // Background sync
+        } else { 
+          clearAuth(); 
+          setUser(null); 
+        } 
+      });
     }
   }, []);
 
@@ -62,6 +79,7 @@ export default function App() {
 
   const handleAuthed = (u) => {
     setUser(u);
+    saveLocalUser(u);
     const next = pendingAction;
     setPendingAction(null);
     if (next === "chat") doStartChat();
@@ -92,13 +110,26 @@ export default function App() {
   };
 
   const handleOpenStory = async (story) => {
-    setStoryContext(story);
+    // HOT DATA: Hydrate instantly from local cache if available
+    const cachedStory = await getLocalStory(story.id);
+    if (cachedStory) {
+       setStoryContext({ ...cachedStory, ...story }); // Merge cache with passed props
+       // Instantly show cached messages if any
+       const cachedMsgs = await getLocalMessages(story.playthrough_id || story.id);
+       if (cachedMsgs.length > 0) setMessages(cachedMsgs.map(m => ({...m, narrative: true, role: m.role === 'system' ? 'assistant' : m.role})));
+    } else {
+       setStoryContext(story);
+    }
+    
     setView("chat");
     const session = createSession();
     refreshSessions();
     setActiveSessionId(session.session_id);
     setStreamingMsg(null); setStatusText(""); setError(null); setNotice(null); setSidebarOpen(false);
-    setMessages([]);
+    
+    // Only clear messages if we didn't hydrate them from cache
+    if (!cachedStory) setMessages([]);
+
     try {
       const playRes = await fetch(`${BASE_URL}/stories/${story.id}/play`, {
         method: "POST",
@@ -109,7 +140,7 @@ export default function App() {
       if (!playRes.ok) throw new Error(friendlyHttp(playRes.status, playData?.detail));
       const pt = playData.playthrough;
 
-      setStoryContext({
+      const finalContext = {
         ...story,
         playthrough_id: pt.id,
         current_day: pt.current_day,
@@ -117,7 +148,12 @@ export default function App() {
         status: pt.status,
         characters: playData.characters || [],
         current_location: pt.metadata?.current_location || "Unknown Realm",
-      });
+      };
+      setStoryContext(finalContext);
+
+      // WARM DATA: Save fresh server data to local DB
+      if (playData.story) await saveLocalStory(playData.story);
+      await saveLocalPlaythrough(pt);
 
       const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
       let msgData = await parseJsonSafe(msgRes);
@@ -137,13 +173,21 @@ export default function App() {
         timestamp: m.created_at,
         narrative: true
       }));
+      
       setMessages(mapped);
       mapped.forEach(m => appendMessage(session.session_id, m));
+      
+      // WARM DATA: Save messages to local DB
+      if (mapped.length > 0) await saveLocalMessages(pt.id, mapped, true);
+
     } catch (err) {
       console.error("[openStory] error:", err);
-      setStoryContext(null);
-      setMessages([]);
-      setView("library");
+      // Don't clear storyContext if we have cached data, just show error
+      if (!cachedStory) {
+        setStoryContext(null);
+        setMessages([]);
+        setView("library");
+      }
       setError(describeNetworkError(err));
     }
   };

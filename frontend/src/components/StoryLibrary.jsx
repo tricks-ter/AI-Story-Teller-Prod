@@ -4,6 +4,10 @@ import { BASE_URL, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkErro
 import { completePlaythrough } from '../utils/api';
 import { fetchStoriesArt, fetchCast, fetchPrologue, uploadStoryArt, uploadCharacterArt, fileToDataUrl } from '../utils/art';
 
+// LOCAL DB IMPORTS
+import { getLocalLibrary, saveLocalLibrary } from '../utils/localDb';
+import { syncQueue } from '../utils/syncQueue';
+
 function timeAgo(iso) {
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60000);
@@ -93,6 +97,10 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onEditStor
           const data = await parseJsonSafe(res);
           if (res.ok) {
             setters[i](data ? data : []);
+            // WARM DATA: Save fresh library feed to local DB
+            if (names[i] === 'All Sagas' && user?.id && data) {
+              saveLocalLibrary(user.id, data);
+            }
           } else {
             setters[i]([]);
             errs.push(`${names[i]}: ${friendlyHttp(res.status, data?.detail)}`);
@@ -108,9 +116,20 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onEditStor
     }
 
     if (errs.length) setError(errs.join('  •  '));
-  }, []);
+  }, [user]);
 
   useEffect(() => { load(); }, [load]);
+
+  // HOT DATA: Hydrate library instantly from local cache on mount
+  useEffect(() => {
+    if (user?.id) {
+      getLocalLibrary(user.id).then(cachedStories => {
+        if (cachedStories && cachedStories.length > 0 && allStories === null) {
+          setAllStories(cachedStories);
+        }
+      });
+    }
+  }, [user]);
 
   // NEW: batch-load cover art once lists arrive
   useEffect(() => {
