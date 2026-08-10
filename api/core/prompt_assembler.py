@@ -10,8 +10,9 @@ for _p in (PARENT_DIR, BASE_DIR):
 from database import db
 
 class PromptAssembler:
-    def __init__(self, playthrough_id: str):
+    def __init__(self, playthrough_id: str, max_chars: int = 40000):
         self.playthrough_id = playthrough_id
+        self.max_chars = max_chars
 
     def assemble_full_prompt(self, user_action: str) -> str:
         pt = db.get_playthrough(self.playthrough_id)
@@ -21,14 +22,18 @@ class PromptAssembler:
         if not story:
             return "You are a helpful assistant."
 
-        # INDUSTRIAL FIX: Batch load state to eliminate N+1 query latency
         state = db.get_full_playthrough_state(self.playthrough_id)
         characters = state["characters"]
         all_items = state["items"]
         all_equipment = state["equipment"]
         all_backpacks = state["backpacks"]
         
-        messages = db.get_playthrough_messages(self.playthrough_id, limit=15)
+        # PHASE 6: Dynamic Context Fetching
+        messages = db.get_recent_messages_for_context(self.playthrough_id, self.max_chars)
+        memory = db.get_memory_summary(self.playthrough_id)
+        lore = db.get_lorebook(self.playthrough_id)
+        nudge = db.get_and_clear_nudge(self.playthrough_id)
+        
         notes = db.get_story_notes(story["id"], active_only=True)
 
         system = f"""[SYSTEM INSTRUCTIONS]
@@ -85,10 +90,8 @@ Time of Day: {pt['time_of_day']}
                 world += "  Abilities: " + ", ".join(
                     a.get("name", "?") for a in abilities if isinstance(a, dict)) + "\n"
 
-            # Map batched items instead of N+1 queries
             char_items = [i for i in all_items if i["character_id"] == c["id"]]
             char_equip_ids = {e["item_id"] for e in all_equipment if e["character_id"] == c["id"]}
-            
             carried = [i for i in char_items if i["id"] not in char_equip_ids]
             
             if carried:
@@ -109,10 +112,22 @@ Time of Day: {pt['time_of_day']}
         if known:
             world += "\nKnown Locations (journey so far): " + ", ".join(l["name"] for l in known) + "\n"
 
-        context = "\n[RECENT STORY CONTEXT]\n"
+        context = "\n[STORY MEMORY & RECENT EVENTS]\n"
+        if memory:
+            context += f"[PREVIOUS CHAPTERS SUMMARY]\n{memory}\n\n"
+            
+        if lore:
+            context += "[WORLD LOREBOOK]\n"
+            for entry in lore[-15:]: # Keep last 15 entries in context
+                context += f"- {entry.get('title', 'Lore')}: {entry.get('content', '')}\n"
+            context += "\n"
+
         for m in messages:
             role = "Player" if m["role"] == "user" else "Narrator"
             context += f"{role}: {m['content']}\n"
+            
+        if nudge:
+            context += f"\n{ nudge }\n"
 
         director = ""
         if notes:

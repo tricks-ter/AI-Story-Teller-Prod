@@ -175,6 +175,7 @@ export default function App() {
       mapped.forEach(m => appendMessage(session.session_id, m));
       
       if (mapped.length > 0) await saveLocalMessages(pt.id, mapped, true);
+      if (pt.id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: pt.id }, "normal");
 
     } catch (err) {
       console.error("[openStory] error:", err);
@@ -343,6 +344,7 @@ export default function App() {
           appendMessage(sessionId, finalMsg);
           setMessages((prev) => [...prev, finalMsg]);
           setStreamingMsg(null); setIsStreaming(false); setStatusText("");
+          if (storyContext?.playthrough_id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: storyContext.playthrough_id }, "normal");
         }
       }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
     } else {
@@ -352,7 +354,8 @@ export default function App() {
         else if (event.type === "thinking") { assistantThinking += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() })); setStatusText(""); }
         else if (event.type === "content") { assistantContent += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() })); setStatusText(""); }
         else if (event.type === "error") { setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); }
-        else if (event.type === "done") { appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }); setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]); setStreamingMsg(null); setIsStreaming(false); setStatusText(""); refreshSessions(); }
+        else if (event.type === "done") { appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }); setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]); setStreamingMsg(null); setIsStreaming(false); setStatusText("");
+          if (storyContext?.playthrough_id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: storyContext.playthrough_id }, "normal"); refreshSessions(); }
       }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
     }
 
@@ -368,6 +371,7 @@ export default function App() {
       setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]);
     }
     setStreamingMsg(null); setIsStreaming(false); setStatusText("");
+          if (storyContext?.playthrough_id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: storyContext.playthrough_id }, "normal");
   };
 
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";

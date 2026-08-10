@@ -1,11 +1,12 @@
 import { saveLocalLibrary, saveLocalStory, saveLocalPlaythrough, saveLocalMessages } from './localDb';
 import { authHeaders, BASE_URL, parseJsonSafe } from './auth';
+import { compressMemory } from './api';
 
 class FIFOQueue {
   constructor() {
     this.queue = [];
     this.processing = false;
-    this.activeTasks = new Set(); // FIX: Track active signatures to prevent race conditions
+    this.activeTasks = new Set();
     this.processors = {};
     this._registerDefaultProcessors();
   }
@@ -48,11 +49,21 @@ class FIFOQueue {
         }
       }
     };
+
+    // PHASE 6: Background Memory Compression
+    this.processors['COMPRESS_MEMORY'] = async (payload) => {
+      const res = await fetch(`${BASE_URL}/playthroughs/${payload.ptId}/messages?limit=100`, { headers: authHeaders() });
+      if (res.ok) {
+        const data = await parseJsonSafe(res);
+        if (Array.isArray(data) && data.length > 50) {
+          await compressMemory(payload.ptId);
+        }
+      }
+    };
   }
 
   enqueue(type, payload = {}, priority = 'normal') {
     const signature = `${type}:${JSON.stringify(payload)}`;
-    // FIX: Prevent duplicate enqueuing if task is currently processing or already queued
     if (this.activeTasks.has(signature)) return;
     const exists = this.queue.some(t => `${t.type}:${JSON.stringify(t.payload)}` === signature);
     if (exists) return;

@@ -289,7 +289,13 @@ def use_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
     res = db.use_item(playthrough_id, char_id, req.item_id)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=REASON_TEXT.get(res.get("reason"), "Could not use item."))
-    return {"status": "used", "name": res.get("name")}
+    
+    # PHASE 6: Consumable AI Nudge
+    item_name = res.get("name", "an item")
+    nudge = f"[SYSTEM DIRECTIVE: The player just consumed/used '{item_name}'. Narrate the immediate physical sensation, the visual effect, and apply appropriate [STAT_UPDATE] tags (e.g., restoring Health/Mana). Do not advance the plot until the effect is resolved.]"
+    db.set_active_nudge(playthrough_id, nudge)
+    
+    return {"status": "used", "name": item_name}
 
 @router.post("/playthroughs/{playthrough_id}/drop")
 def drop_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
@@ -308,6 +314,46 @@ def complete_playthrough(playthrough_id: str, raw: Request):
     require_own_playthrough(playthrough_id, user)
     db.complete_playthrough(playthrough_id)
     return {"status": "completed"}
+
+@router.post("/playthroughs/{playthrough_id}/compress")
+async def compress_memory(playthrough_id: str, raw: Request):
+    from zai import ZaiClient
+    user = require_user(raw)
+    require_own_playthrough(playthrough_id, user)
+    
+    msgs = db.get_playthrough_messages(playthrough_id, limit=100)
+    if len(msgs) < 60:
+        return {"status": "skipped", "reason": "not_enough_messages"}
+        
+    to_summarize = msgs[:40]
+    text_to_summarize = "\n".join([f"{m['role']}: {m['content']}" for m in to_summarize])
+    existing_memory = db.get_memory_summary(playthrough_id)
+    
+    prompt = f"""You are a master archivist. Compress the following RPG story transcript into a concise, dense "Chapter Summary" that preserves key plot points, NPC relationships, and unresolved mysteries. 
+If there is an existing summary, append the new events to it seamlessly.
+Existing Summary: {existing_memory or 'None'}
+
+New Transcript to Compress:
+{text_to_summarize}
+
+Output ONLY the updated, combined summary. No meta-commentary."""
+
+    client = ZaiClient(api_key=API_KEY) if API_KEY else None
+    if not client: return {"status": "error", "reason": "no_api_key"}
+    
+    try:
+        response = client.chat.completions.create(
+            model="glm-4.5-flash", 
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2048,
+            temperature=0.3
+        )
+        summary = response.choices[0].message.content.strip()
+        db.update_memory_summary(playthrough_id, summary)
+        return {"status": "compressed", "chars": len(summary)}
+    except Exception as e:
+        logger.error(f"Compression failed: {e}")
+        return {"status": "error", "reason": str(e)}
 
 @router.get("/stories/{story_id}")
 def get_story_detail(story_id: str, raw: Request):
@@ -375,7 +421,6 @@ def set_visibility(story_id: str, req: VisibilityRequest, raw: Request):
     db.set_story_visibility(story_id, req.is_public)
     return {"status": "updated", "is_public": req.is_public}
 
-# FIX: Moved PATCH route BEFORE app.include_router() so FastAPI actually registers it
 @router.patch("/stories/{story_id}")
 def update_story_details(story_id: str, req: StoryUpdateRequest, raw: Request):
     user = require_user(raw)
@@ -429,7 +474,11 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
     if not _recent_duplicate(db.get_last_playthrough_message(pid), request.user_action):
         db.add_playthrough_message(story_id, pid, "user", request.user_action, msg_type="action", telemetry=telemetry)
 
-    assembler = PromptAssembler(pid)
+    # PHASE 6: Dynamic Context Allocation
+    model = request.model
+    max_chars = 150000 if "nova" in model.lower() or "glm-4.7" in model else 40000
+    
+    assembler = PromptAssembler(pid, max_chars=max_chars)
     system_prompt = assembler.assemble_full_prompt(request.user_action)
 
     client = ZaiClient(api_key=API_KEY) if API_KEY else None

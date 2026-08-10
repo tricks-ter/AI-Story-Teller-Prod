@@ -928,3 +928,62 @@ def get_cast_with_images(story_id):
             (playthrough_id,), fetch="all") or []
             
         return {"characters": chars, "items": items, "equipment": equipment, "backpacks": backpacks}
+
+    # ── Phase 6: Memory, Lorebook, and Nudges ──
+    def get_recent_messages_for_context(self, playthrough_id, max_chars=40000):
+        msgs = self.execute_query(
+            "SELECT id, role, content FROM story_messages WHERE playthrough_id = %s ORDER BY id ASC",
+            (playthrough_id,), fetch="all") or []
+        
+        selected = []
+        current_chars = 0
+        # Build from the end backwards to prioritize recent context
+        for m in reversed(msgs):
+            msg_len = len(m["content"]) + 10 # overhead for role formatting
+            if current_chars + msg_len > max_chars and selected:
+                break
+            selected.append(m)
+            current_chars += msg_len
+            
+        return list(reversed(selected))
+
+    def update_memory_summary(self, playthrough_id, summary):
+        self.execute_query(
+            "UPDATE playthroughs SET memory_summary = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (summary, playthrough_id), fetch="none", commit=True)
+
+    def get_memory_summary(self, playthrough_id):
+        row = self.execute_query("SELECT memory_summary FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
+        return row["memory_summary"] if row and row.get("memory_summary") else ""
+
+    def append_lorebook_entry(self, playthrough_id, entry_dict):
+        def fn(cur):
+            cur.execute("SELECT lorebook FROM playthroughs WHERE id = %s", (playthrough_id,))
+            row = cur.fetchone()
+            lore = row["lorebook"] if row and isinstance(row.get("lorebook"), list) else []
+            if "title" in entry_dict:
+                lore = [l for l in lore if l.get("title") != entry_dict["title"]]
+            lore.append(entry_dict)
+            lore = lore[-50:] # Keep last 50 entries
+            cur.execute("UPDATE playthroughs SET lorebook = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(lore), playthrough_id))
+        self._with_conn(fn, commit=True)
+
+    def get_lorebook(self, playthrough_id):
+        row = self.execute_query("SELECT lorebook FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
+        return row["lorebook"] if row and isinstance(row.get("lorebook"), list) else []
+
+    def set_active_nudge(self, playthrough_id, nudge):
+        self.execute_query(
+            "UPDATE playthroughs SET active_nudge = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (nudge, playthrough_id), fetch="none", commit=True)
+
+    def get_and_clear_nudge(self, playthrough_id):
+        def fn(cur):
+            cur.execute("SELECT active_nudge FROM playthroughs WHERE id = %s", (playthrough_id,))
+            row = cur.fetchone()
+            nudge = row["active_nudge"] if row and row.get("active_nudge") else ""
+            if nudge:
+                cur.execute("UPDATE playthroughs SET active_nudge = '' WHERE id = %s", (playthrough_id,))
+            return nudge
+        return self._with_conn(fn, commit=True) or ""

@@ -150,3 +150,5 @@ export const unequipItem = (pid, itemId) => postAction(`/playthroughs/${pid}/une
 export const useItem = (pid, itemId) => postAction(`/playthroughs/${pid}/use`, { item_id: itemId });
 export const dropItem = (pid, itemId) => postAction(`/playthroughs/${pid}/drop`, { item_id: itemId });
 export const completePlaythrough = (pid) => postAction(`/playthroughs/${pid}/complete`, {});
+
+export const compressMemory = (pid) => postAction(`/playthroughs/${pid}/compress`, {});
