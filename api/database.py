@@ -843,46 +843,7 @@ class Database:
             return True
         return self._with_conn(fn, commit=True) is True
 
-db = Database()
-
-try:
-    db.init_tables()
-except Exception as e:
-    logger.error(f"DB init warning: {e}")
-
-    # ── Phase 6 UI: story & character art (appended inside class-safe zone) ──
-def set_story_art(story_id, kind, data_url):
-    col = "cover_image" if kind == "cover" else "banner_image"
-    db.execute_query(
-        "UPDATE stories SET " + col + " = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-        (data_url, story_id), fetch="none", commit=True)
-    return True
-
-def set_character_image(character_id, data_url):
-    db.execute_query(
-        "UPDATE story_characters SET image = %s WHERE id = %s",
-        (data_url, character_id), fetch="none", commit=True)
-    return True
-
-def get_stories_art(ids):
-    if not ids:
-        return {}
-    rows = db.execute_query(
-        "SELECT id, cover_image, banner_image FROM stories WHERE id = ANY(%s)",
-        (list(ids),), fetch="all")
-    if rows is None:  # pre-migration fallback (rule 8)
-        return {i: {"cover_image": "", "banner_image": ""} for i in ids}
-    return {r["id"]: {"cover_image": r.get("cover_image") or "", "banner_image": r.get("banner_image") or ""} for r in rows}
-
-def get_cast_with_images(story_id):
-    rows = db.execute_query(
-        "SELECT id, name, role, background, is_player, image FROM story_characters "
-        "WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
-        (story_id,), fetch="all")
-    if rows is None:  # pre-migration fallback
-        return db.get_story_characters(story_id)
-    return [dict(r, image=r.get("image") or "") for r in rows]
-
+    # ── Phase 6: Story Editing ──
     def update_story_metadata(self, story_id, title, genre, premise, is_public):
         try:
             self.execute_query(
@@ -895,19 +856,7 @@ def get_cast_with_images(story_id):
                 (title, genre, premise, story_id),
                 fetch="none", commit=True)
 
-    def update_story_metadata(self, story_id, title, genre, premise, is_public):
-        try:
-            self.execute_query(
-                "UPDATE stories SET title = %s, genre = %s, premise = %s, is_public = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                (title, genre, premise, bool(is_public), story_id),
-                fetch="none", commit=True)
-        except Exception:
-            self.execute_query(
-                "UPDATE stories SET title = %s, genre = %s, premise = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                (title, genre, premise, story_id),
-                fetch="none", commit=True)
-
-    # ── N+1 Query Eliminator ──
+    # ── Phase 6: N+1 Query Eliminator ──
     def get_full_playthrough_state(self, playthrough_id):
         chars = self.get_playthrough_characters(playthrough_id)
         if not chars: return {"characters": [], "items": [], "equipment": [], "backpacks": []}
@@ -937,9 +886,8 @@ def get_cast_with_images(story_id):
         
         selected = []
         current_chars = 0
-        # Build from the end backwards to prioritize recent context
         for m in reversed(msgs):
-            msg_len = len(m["content"]) + 10 # overhead for role formatting
+            msg_len = len(m["content"]) + 10
             if current_chars + msg_len > max_chars and selected:
                 break
             selected.append(m)
@@ -964,7 +912,7 @@ def get_cast_with_images(story_id):
             if "title" in entry_dict:
                 lore = [l for l in lore if l.get("title") != entry_dict["title"]]
             lore.append(entry_dict)
-            lore = lore[-50:] # Keep last 50 entries
+            lore = lore[-50:]
             cur.execute("UPDATE playthroughs SET lorebook = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                         (json.dumps(lore), playthrough_id))
         self._with_conn(fn, commit=True)
@@ -987,3 +935,43 @@ def get_cast_with_images(story_id):
                 cur.execute("UPDATE playthroughs SET active_nudge = '' WHERE id = %s", (playthrough_id,))
             return nudge
         return self._with_conn(fn, commit=True) or ""
+
+# ── Module-level instance and helpers ──
+db = Database()
+
+try:
+    db.init_tables()
+except Exception as e:
+    logger.error(f"DB init warning: {e}")
+
+def set_story_art(story_id, kind, data_url):
+    col = "cover_image" if kind == "cover" else "banner_image"
+    db.execute_query(
+        "UPDATE stories SET " + col + " = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+        (data_url, story_id), fetch="none", commit=True)
+    return True
+
+def set_character_image(character_id, data_url):
+    db.execute_query(
+        "UPDATE story_characters SET image = %s WHERE id = %s",
+        (data_url, character_id), fetch="none", commit=True)
+    return True
+
+def get_stories_art(ids):
+    if not ids:
+        return {}
+    rows = db.execute_query(
+        "SELECT id, cover_image, banner_image FROM stories WHERE id = ANY(%s)",
+        (list(ids),), fetch="all")
+    if rows is None:
+        return {i: {"cover_image": "", "banner_image": ""} for i in ids}
+    return {r["id"]: {"cover_image": r.get("cover_image") or "", "banner_image": r.get("banner_image") or ""} for r in rows}
+
+def get_cast_with_images(story_id):
+    rows = db.execute_query(
+        "SELECT id, name, role, background, is_player, image FROM story_characters "
+        "WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
+        (story_id,), fetch="all")
+    if rows is None:
+        return db.get_story_characters(story_id)
+    return [dict(r, image=r.get("image") or "") for r in rows]
