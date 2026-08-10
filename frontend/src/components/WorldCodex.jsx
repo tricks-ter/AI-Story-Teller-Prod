@@ -87,7 +87,7 @@ export default function WorldCodex({ playthroughId, onClose }) {
               <div className="bg-purple-500/10 text-purple-400 p-4 rounded-2xl w-fit mx-auto mb-3"><ScrollText className="w-7 h-7" /></div>
               <p className="text-sm text-gray-400">The world awakens as you explore. Kingdoms, noble houses and people you meet will be recorded here — with their living state.</p>
             </div>
-          )
+          )}
 
           {powers.length > 0 && (
             <section>
