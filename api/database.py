@@ -849,3 +849,36 @@ try:
     db.init_tables()
 except Exception as e:
     logger.error(f"DB init warning: {e}")
+
+    # ── Phase 6 UI: story & character art (appended inside class-safe zone) ──
+def set_story_art(story_id, kind, data_url):
+    col = "cover_image" if kind == "cover" else "banner_image"
+    db.execute_query(
+        "UPDATE stories SET " + col + " = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+        (data_url, story_id), fetch="none", commit=True)
+    return True
+
+def set_character_image(character_id, data_url):
+    db.execute_query(
+        "UPDATE story_characters SET image = %s WHERE id = %s",
+        (data_url, character_id), fetch="none", commit=True)
+    return True
+
+def get_stories_art(ids):
+    if not ids:
+        return {}
+    rows = db.execute_query(
+        "SELECT id, cover_image, banner_image FROM stories WHERE id = ANY(%s)",
+        (list(ids),), fetch="all")
+    if rows is None:  # pre-migration fallback (rule 8)
+        return {i: {"cover_image": "", "banner_image": ""} for i in ids}
+    return {r["id"]: {"cover_image": r.get("cover_image") or "", "banner_image": r.get("banner_image") or ""} for r in rows}
+
+def get_cast_with_images(story_id):
+    rows = db.execute_query(
+        "SELECT id, name, role, background, is_player, image FROM story_characters "
+        "WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
+        (story_id,), fetch="all")
+    if rows is None:  # pre-migration fallback
+        return db.get_story_characters(story_id)
+    return [dict(r, image=r.get("image") or "") for r in rows]
