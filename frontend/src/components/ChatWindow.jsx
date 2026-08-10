@@ -15,8 +15,13 @@ export default function ChatWindow({
   const bottomRef = useRef(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingMsg, statusText]);
+    if (bottomRef.current) {
+      // FIX: Use "auto" during rapid streaming to prevent mobile UI jank/layout thrashing.
+      // "smooth" is reserved for discrete new messages.
+      const behavior = isStreaming ? "auto" : "smooth";
+      bottomRef.current.scrollIntoView({ behavior, block: "end" });
+    }
+  }, [messages, streamingMsg, statusText, isStreaming]);
 
   const hasMessages = messages.length > 0 || streamingMsg;
 

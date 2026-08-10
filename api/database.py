@@ -894,3 +894,37 @@ def get_cast_with_images(story_id):
                 "UPDATE stories SET title = %s, genre = %s, premise = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (title, genre, premise, story_id),
                 fetch="none", commit=True)
+
+    def update_story_metadata(self, story_id, title, genre, premise, is_public):
+        try:
+            self.execute_query(
+                "UPDATE stories SET title = %s, genre = %s, premise = %s, is_public = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (title, genre, premise, bool(is_public), story_id),
+                fetch="none", commit=True)
+        except Exception:
+            self.execute_query(
+                "UPDATE stories SET title = %s, genre = %s, premise = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (title, genre, premise, story_id),
+                fetch="none", commit=True)
+
+    # ── N+1 Query Eliminator ──
+    def get_full_playthrough_state(self, playthrough_id):
+        chars = self.get_playthrough_characters(playthrough_id)
+        if not chars: return {"characters": [], "items": [], "equipment": [], "backpacks": []}
+        
+        items = self.execute_query(
+            "SELECT id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata "
+            "FROM playthrough_items WHERE playthrough_id = %s",
+            (playthrough_id,), fetch="all") or []
+            
+        equipment = self.execute_query(
+            "SELECT pe.character_id, pe.item_id, pe.slot, pi.name AS item_name, pi.rarity, pi.item_level, pi.metadata "
+            "FROM playthrough_equipment pe JOIN playthrough_items pi ON pi.id = pe.item_id "
+            "WHERE pe.playthrough_id = %s",
+            (playthrough_id,), fetch="all") or []
+            
+        backpacks = self.execute_query(
+            "SELECT id, character_id, level FROM playthrough_backpacks WHERE playthrough_id = %s",
+            (playthrough_id,), fetch="all") or []
+            
+        return {"characters": chars, "items": items, "equipment": equipment, "backpacks": backpacks}

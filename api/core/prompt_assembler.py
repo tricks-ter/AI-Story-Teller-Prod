@@ -21,7 +21,13 @@ class PromptAssembler:
         if not story:
             return "You are a helpful assistant."
 
-        characters = db.get_playthrough_characters(self.playthrough_id)
+        # INDUSTRIAL FIX: Batch load state to eliminate N+1 query latency
+        state = db.get_full_playthrough_state(self.playthrough_id)
+        characters = state["characters"]
+        all_items = state["items"]
+        all_equipment = state["equipment"]
+        all_backpacks = state["backpacks"]
+        
         messages = db.get_playthrough_messages(self.playthrough_id, limit=15)
         notes = db.get_story_notes(story["id"], active_only=True)
 
@@ -79,22 +85,24 @@ Time of Day: {pt['time_of_day']}
                 world += "  Abilities: " + ", ".join(
                     a.get("name", "?") for a in abilities if isinstance(a, dict)) + "\n"
 
-            carried = db.list_carried_items_for_character(c["id"])
-            legacy_inv = cmeta.get("inventory", [])
+            # Map batched items instead of N+1 queries
+            char_items = [i for i in all_items if i["character_id"] == c["id"]]
+            char_equip_ids = {e["item_id"] for e in all_equipment if e["character_id"] == c["id"]}
+            
+            carried = [i for i in char_items if i["id"] not in char_equip_ids]
+            
             if carried:
                 world += "  Carried: " + ", ".join(
                     f"{i['name']} ×{i['quantity']}" if i["quantity"] > 1 else i["name"] for i in carried) + "\n"
-            elif isinstance(legacy_inv, list) and legacy_inv:
-                world += "  Carried: " + ", ".join(str(x) for x in legacy_inv) + "\n"
 
-            equipped = db.list_equipment_for_character(c["id"])
+            equipped = [e for e in all_equipment if e["character_id"] == c["id"]]
             if equipped:
                 world += "  Equipped: " + ", ".join(
                     f"{e['item_name']} ({e['slot']}, lv{e['item_level']})" for e in equipped) + "\n"
 
-            bp = db.get_backpack_for_character(c["id"])
+            bp = next((b for b in all_backpacks if b["character_id"] == c["id"]), None)
             if bp:
-                used = db.backpack_used_capacity(c["id"])
+                used = sum(i["weight"] * i["quantity"] for i in carried)
                 world += f"  Backpack: Level {bp['level']}, load {used}/{5 + bp['level'] * 5}\n"
 
         known = db.get_playthrough_map(self.playthrough_id)

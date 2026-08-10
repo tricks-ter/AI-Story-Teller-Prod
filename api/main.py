@@ -81,6 +81,13 @@ class StoryCreateRequest(BaseModel):
     isPublic: bool = True
     client_telemetry: Optional[dict] = None
 
+class StoryUpdateRequest(BaseModel):
+    title: str
+    genre: str
+    premise: str
+    isPublic: bool = True
+    client_telemetry: Optional[dict] = None
+
 class AuthRequest(BaseModel):
     username: str
     password: str
@@ -368,6 +375,16 @@ def set_visibility(story_id: str, req: VisibilityRequest, raw: Request):
     db.set_story_visibility(story_id, req.is_public)
     return {"status": "updated", "is_public": req.is_public}
 
+# FIX: Moved PATCH route BEFORE app.include_router() so FastAPI actually registers it
+@router.patch("/stories/{story_id}")
+def update_story_details(story_id: str, req: StoryUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    require_story_owner(story, user)
+    db.update_story_metadata(story_id, req.title, req.genre, req.premise, req.isPublic)
+    return {"story_id": story_id, "status": "updated", "title": req.title}
+
 @router.post("/stories/{story_id}/play")
 def play_story(story_id: str, raw: Request):
     user = require_user(raw)
@@ -523,19 +540,3 @@ async def chat_stream(request: ChatRequest, raw: Request):
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 app.include_router(router)
-
-class StoryUpdateRequest(BaseModel):
-    title: str
-    genre: str
-    premise: str
-    isPublic: bool = True
-    client_telemetry: Optional[dict] = None
-
-@router.patch("/stories/{story_id}")
-def update_story_details(story_id: str, req: StoryUpdateRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
-    db.update_story_metadata(story_id, req.title, req.genre, req.premise, req.isPublic)
-    return {"story_id": story_id, "status": "updated", "title": req.title}

@@ -9,7 +9,6 @@ export function getDB() {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
       upgrade(db) {
-        // Mirroring Postgres schema for local caching
         if (!db.objectStoreNames.contains('user_session')) {
           db.createObjectStore('user_session', { keyPath: 'id' });
         }
@@ -95,7 +94,6 @@ export async function saveLocalMessages(contextId, messages, isPlaythrough = fal
   const indexName = isPlaythrough ? 'playthrough_id' : 'session_id';
   const index = tx.store.index(indexName);
   
-  // Clear old messages for this context to prevent duplicates/bloat
   for await (const cursor of index.iterate(contextId)) {
     await cursor.delete();
   }
@@ -107,5 +105,17 @@ export async function saveLocalMessages(contextId, messages, isPlaythrough = fal
       playthrough_id: isPlaythrough ? contextId : null
     });
   }
+  await tx.done;
+}
+
+// --- SECURITY / LIFECYCLE ---
+export async function clearLocalDB() {
+  const db = await getDB();
+  const tx = db.transaction(['user_session', 'stories', 'playthroughs', 'messages', 'library_feed'], 'readwrite');
+  await tx.objectStore('user_session').clear();
+  await tx.objectStore('stories').clear();
+  await tx.objectStore('playthroughs').clear();
+  await tx.objectStore('messages').clear();
+  await tx.objectStore('library_feed').clear();
   await tx.done;
 }

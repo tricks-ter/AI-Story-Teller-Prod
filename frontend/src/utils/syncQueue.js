@@ -5,6 +5,7 @@ class FIFOQueue {
   constructor() {
     this.queue = [];
     this.processing = false;
+    this.activeTasks = new Set(); // FIX: Track active signatures to prevent race conditions
     this.processors = {};
     this._registerDefaultProcessors();
   }
@@ -50,11 +51,13 @@ class FIFOQueue {
   }
 
   enqueue(type, payload = {}, priority = 'normal') {
-    // Dedupe: don't queue the exact same task if it's already waiting
-    const exists = this.queue.some(t => t.type === type && JSON.stringify(t.payload) === JSON.stringify(payload));
+    const signature = `${type}:${JSON.stringify(payload)}`;
+    // FIX: Prevent duplicate enqueuing if task is currently processing or already queued
+    if (this.activeTasks.has(signature)) return;
+    const exists = this.queue.some(t => `${t.type}:${JSON.stringify(t.payload)}` === signature);
     if (exists) return;
 
-    this.queue.push({ id: crypto.randomUUID(), type, payload, priority, attempts: 0 });
+    this.queue.push({ id: crypto.randomUUID(), type, payload, priority, attempts: 0, signature });
     this._processNext();
   }
 
@@ -62,9 +65,9 @@ class FIFOQueue {
     if (this.processing || this.queue.length === 0 || !navigator.onLine) return;
     this.processing = true;
 
-    // Sort by priority (high first)
     this.queue.sort((a, b) => (a.priority === 'high' ? -1 : 1));
     const task = this.queue.shift();
+    this.activeTasks.add(task.signature);
 
     try {
       if (this.processors[task.type]) {
@@ -72,11 +75,12 @@ class FIFOQueue {
       }
     } catch (e) {
       console.warn(`[SyncQueue] Task ${task.type} failed.`, e);
+    } finally {
+      this.activeTasks.delete(task.signature);
     }
 
     this.processing = false;
 
-    // Yield to main thread before next task to prevent UI jank
     if ('requestIdleCallback' in window) {
       window.requestIdleCallback(() => this._processNext());
     } else {
@@ -87,5 +91,4 @@ class FIFOQueue {
 
 export const syncQueue = new FIFOQueue();
 
-// Listen for network status changes to resume queue when back online
 window.addEventListener('online', () => syncQueue._processNext());

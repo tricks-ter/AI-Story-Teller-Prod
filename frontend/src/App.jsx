@@ -14,7 +14,7 @@ import { listSessions, createSession, getMessages, appendMessage, updateSessionT
 import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
 
 // LOCAL DB IMPORTS
-import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPlaythrough, saveLocalPlaythrough, getLocalMessages, saveLocalMessages } from "./utils/localDb";
+import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPlaythrough, saveLocalPlaythrough, getLocalMessages, saveLocalMessages, clearLocalDB } from "./utils/localDb";
 import { syncQueue } from "./utils/syncQueue";
 
 export default function App() {
@@ -45,14 +45,13 @@ export default function App() {
   
   useEffect(() => {
     if (getToken()) {
-      // HOT DATA: Hydrate user instantly from IndexedDB before network resolves
       getLocalUser().then(localU => { if (localU && !user) setUser(localU); });
 
       fetchMe().then(u => { 
         if (u) {
           setUser(u); 
-          saveLocalUser(u); // Warm update
-          syncQueue.enqueue('SYNC_LIBRARY', { userId: u.id }); // Background sync
+          saveLocalUser(u);
+          syncQueue.enqueue('SYNC_LIBRARY', { userId: u.id });
         } else { 
           clearAuth(); 
           setUser(null); 
@@ -90,6 +89,8 @@ export default function App() {
   const handleLogout = () => {
     fetch(`${BASE_URL}/auth/logout`, { method: "POST", headers: authHeaders() }).catch(() => {});
     clearAuth(); setUser(null); setStoryContext(null); setView("landing");
+    // SECURITY FIX: Purge local cache to prevent cross-user data leakage
+    clearLocalDB().catch(() => {});
   };
 
   const handleEndJourney = async () => {
@@ -110,11 +111,9 @@ export default function App() {
   };
 
   const handleOpenStory = async (story) => {
-    // HOT DATA: Hydrate instantly from local cache if available
     const cachedStory = await getLocalStory(story.id);
     if (cachedStory) {
-       setStoryContext({ ...cachedStory, ...story }); // Merge cache with passed props
-       // Instantly show cached messages if any
+       setStoryContext({ ...cachedStory, ...story });
        const cachedMsgs = await getLocalMessages(story.playthrough_id || story.id);
        if (cachedMsgs.length > 0) setMessages(cachedMsgs.map(m => ({...m, narrative: true, role: m.role === 'system' ? 'assistant' : m.role})));
     } else {
@@ -127,7 +126,6 @@ export default function App() {
     setActiveSessionId(session.session_id);
     setStreamingMsg(null); setStatusText(""); setError(null); setNotice(null); setSidebarOpen(false);
     
-    // Only clear messages if we didn't hydrate them from cache
     if (!cachedStory) setMessages([]);
 
     try {
@@ -151,7 +149,6 @@ export default function App() {
       };
       setStoryContext(finalContext);
 
-      // WARM DATA: Save fresh server data to local DB
       if (playData.story) await saveLocalStory(playData.story);
       await saveLocalPlaythrough(pt);
 
@@ -177,12 +174,10 @@ export default function App() {
       setMessages(mapped);
       mapped.forEach(m => appendMessage(session.session_id, m));
       
-      // WARM DATA: Save messages to local DB
       if (mapped.length > 0) await saveLocalMessages(pt.id, mapped, true);
 
     } catch (err) {
       console.error("[openStory] error:", err);
-      // Don't clear storyContext if we have cached data, just show error
       if (!cachedStory) {
         setStoryContext(null);
         setMessages([]);
