@@ -1,6 +1,5 @@
-import { saveLocalLibrary, saveLocalStory, saveLocalPlaythrough, saveLocalMessages } from './localDb';
+import { saveLocalLibrary, saveLocalStory, saveLocalPlaythrough, saveLocalMessages, setHudCache } from './localDb';
 import { authHeaders, BASE_URL, parseJsonSafe } from './auth';
-import { compressMemory } from './api';
 
 class FIFOQueue {
   constructor() {
@@ -50,14 +49,57 @@ class FIFOQueue {
       }
     };
 
-    // PHASE 6: Background Memory Compression
+    // Phase 6: Background memory compression
     this.processors['COMPRESS_MEMORY'] = async (payload) => {
       const res = await fetch(`${BASE_URL}/playthroughs/${payload.ptId}/messages?limit=100`, { headers: authHeaders() });
       if (res.ok) {
         const data = await parseJsonSafe(res);
         if (Array.isArray(data) && data.length > 50) {
-          await compressMemory(payload.ptId);
+          await fetch(`${BASE_URL}/playthroughs/${payload.ptId}/compress`, {
+            method: 'POST',
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({})
+          });
         }
+      }
+    };
+
+    // Phase 6: Fetch fresh HUD data from cloud and update local cache
+    this.processors['SYNC_HUD'] = async (payload) => {
+      const { ptId, key } = payload;
+      if (key === 'inventory') {
+        const res = await fetch(`${BASE_URL}/playthroughs/${ptId}/inventory`, { headers: authHeaders() });
+        if (res.ok) {
+          const data = await parseJsonSafe(res);
+          if (data) await setHudCache(ptId, 'inventory', data);
+        }
+      } else if (key === 'map') {
+        const res = await fetch(`${BASE_URL}/playthroughs/${ptId}/map`, { headers: authHeaders() });
+        if (res.ok) {
+          const data = await parseJsonSafe(res);
+          if (data) await setHudCache(ptId, 'map', data);
+        }
+      }
+    };
+
+    // Phase 6: Execute an inventory mutation against the cloud, then reconcile cache
+    this.processors['HUD_ACTION'] = async (payload) => {
+      const { ptId, action, itemId } = payload;
+      try {
+        const res = await fetch(`${BASE_URL}/playthroughs/${ptId}/${action}`, {
+          method: 'POST',
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ item_id: itemId })
+        });
+        // Reconcile: always refresh inventory cache from server after action
+        const invRes = await fetch(`${BASE_URL}/playthroughs/${ptId}/inventory`, { headers: authHeaders() });
+        if (invRes.ok) {
+          const data = await parseJsonSafe(invRes);
+          if (data) await setHudCache(ptId, 'inventory', data);
+        }
+        if (!res.ok) console.warn(`[HUD_ACTION] ${action} failed on server`);
+      } catch (e) {
+        console.warn('[HUD_ACTION] error', e);
       }
     };
   }

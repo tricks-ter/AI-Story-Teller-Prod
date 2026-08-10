@@ -1,14 +1,14 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'inkmind_local';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
 export function getDB() {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db) {
+      upgrade(db, oldVersion) {
         if (!db.objectStoreNames.contains('user_session')) {
           db.createObjectStore('user_session', { keyPath: 'id' });
         }
@@ -25,6 +25,11 @@ export function getDB() {
         }
         if (!db.objectStoreNames.contains('library_feed')) {
           db.createObjectStore('library_feed', { keyPath: 'user_id' });
+        }
+        // Phase 6: HUD state cache for lightning-fast inventory/map/stats
+        if (!db.objectStoreNames.contains('hud_cache')) {
+          const hudStore = db.createObjectStore('hud_cache', { keyPath: 'cache_key' });
+          hudStore.createIndex('playthrough_id', 'playthrough_id');
         }
       }
     });
@@ -108,14 +113,47 @@ export async function saveLocalMessages(contextId, messages, isPlaythrough = fal
   await tx.done;
 }
 
+// --- HUD CACHE HELPERS (Phase 6: Lightning-fast HUD) ---
+export async function getHudCache(playthroughId, key) {
+  try {
+    const db = await getDB();
+    const row = await db.get('hud_cache', `${playthroughId}:${key}`);
+    return row ? row.data : null;
+  } catch { return null; }
+}
+
+export async function setHudCache(playthroughId, key, data) {
+  try {
+    const db = await getDB();
+    await db.put('hud_cache', {
+      cache_key: `${playthroughId}:${key}`,
+      playthrough_id: playthroughId,
+      key: key,
+      data: data,
+      cached_at: Date.now()
+    });
+  } catch (e) { console.warn('[hudCache] set failed', e); }
+}
+
+export async function clearHudCache(playthroughId) {
+  try {
+    const db = await getDB();
+    const tx = db.transaction('hud_cache', 'readwrite');
+    const index = tx.store.index('playthrough_id');
+    for await (const cursor of index.iterate(playthroughId)) {
+      await cursor.delete();
+    }
+    await tx.done;
+  } catch (e) { console.warn('[hudCache] clear failed', e); }
+}
+
 // --- SECURITY / LIFECYCLE ---
 export async function clearLocalDB() {
   const db = await getDB();
-  const tx = db.transaction(['user_session', 'stories', 'playthroughs', 'messages', 'library_feed'], 'readwrite');
-  await tx.objectStore('user_session').clear();
-  await tx.objectStore('stories').clear();
-  await tx.objectStore('playthroughs').clear();
-  await tx.objectStore('messages').clear();
-  await tx.objectStore('library_feed').clear();
+  const storeNames = ['user_session', 'stories', 'playthroughs', 'messages', 'library_feed', 'hud_cache'];
+  const tx = db.transaction(storeNames, 'readwrite');
+  for (const name of storeNames) {
+    await tx.objectStore(name).clear();
+  }
   await tx.done;
 }

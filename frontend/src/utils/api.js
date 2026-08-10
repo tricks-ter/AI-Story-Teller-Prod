@@ -1,4 +1,6 @@
 import { BASE_URL, authHeaders, withTelemetry, parseJsonSafe } from "./auth";
+import { getCachedInventory, getCachedMap, cacheInventory, cacheMap, optimisticItemAction } from "./hudStore";
+import { syncQueue } from "./syncQueue";
 
 export { BASE_URL };
 
@@ -127,28 +129,61 @@ async function postAction(path, payload) {
   }
 }
 
+// ── LOCAL-FIRST HUD FETCHERS ──
+// Return cached data instantly, then queue a background cloud refresh.
 export async function fetchInventory(playthroughId) {
+  const cached = await getCachedInventory(playthroughId);
+  // Always queue a background refresh to keep cache fresh
+  syncQueue.enqueue('SYNC_HUD', { ptId: playthroughId, key: 'inventory' }, 'normal');
+  if (cached) return cached;
+  // No cache yet: must fetch from API (first load)
   try {
     const res = await fetch(`${BASE_URL}/playthroughs/${playthroughId}/inventory`, { headers: authHeaders() });
     const data = await parseJsonSafe(res);
     if (!res.ok) return null;
+    await cacheInventory(playthroughId, data);
     return data;
   } catch { return null; }
 }
 
 export async function fetchMap(playthroughId) {
+  const cached = await getCachedMap(playthroughId);
+  syncQueue.enqueue('SYNC_HUD', { ptId: playthroughId, key: 'map' }, 'normal');
+  if (cached) return cached;
   try {
     const res = await fetch(`${BASE_URL}/playthroughs/${playthroughId}/map`, { headers: authHeaders() });
     const data = await parseJsonSafe(res);
     if (!res.ok) return null;
+    await cacheMap(playthroughId, data);
     return data;
   } catch { return null; }
 }
 
-export const equipItem = (pid, itemId) => postAction(`/playthroughs/${pid}/equip`, { item_id: itemId });
-export const unequipItem = (pid, itemId) => postAction(`/playthroughs/${pid}/unequip`, { item_id: itemId });
-export const useItem = (pid, itemId) => postAction(`/playthroughs/${pid}/use`, { item_id: itemId });
-export const dropItem = (pid, itemId) => postAction(`/playthroughs/${pid}/drop`, { item_id: itemId });
-export const completePlaythrough = (pid) => postAction(`/playthroughs/${pid}/complete`, {});
+// ── OPTIMISTIC ITEM ACTIONS ──
+// Apply to local cache instantly, queue cloud sync in background.
+export async function equipItem(pid, itemId) {
+  await optimisticItemAction(pid, 'equip', itemId);
+  syncQueue.enqueue('HUD_ACTION', { ptId: pid, action: 'equip', itemId }, 'high');
+  return { ok: true, optimistic: true };
+}
 
+export async function unequipItem(pid, itemId) {
+  await optimisticItemAction(pid, 'unequip', itemId);
+  syncQueue.enqueue('HUD_ACTION', { ptId: pid, action: 'unequip', itemId }, 'high');
+  return { ok: true, optimistic: true };
+}
+
+export async function useItem(pid, itemId) {
+  await optimisticItemAction(pid, 'use', itemId);
+  syncQueue.enqueue('HUD_ACTION', { ptId: pid, action: 'use', itemId }, 'high');
+  return { ok: true, optimistic: true };
+}
+
+export async function dropItem(pid, itemId) {
+  await optimisticItemAction(pid, 'drop', itemId);
+  syncQueue.enqueue('HUD_ACTION', { ptId: pid, action: 'drop', itemId }, 'high');
+  return { ok: true, optimistic: true };
+}
+
+export const completePlaythrough = (pid) => postAction(`/playthroughs/${pid}/complete`, {});
 export const compressMemory = (pid) => postAction(`/playthroughs/${pid}/compress`, {});

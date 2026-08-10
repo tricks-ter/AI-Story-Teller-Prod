@@ -12,9 +12,8 @@ import HUD from "./components/HUD";
 import { streamChat, streamStory, completePlaythrough } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
 import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry } from "./utils/auth";
-
-// LOCAL DB IMPORTS
-import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPlaythrough, saveLocalPlaythrough, getLocalMessages, saveLocalMessages, clearLocalDB } from "./utils/localDb";
+import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPlaythrough, saveLocalPlaythrough, getLocalMessages, saveLocalMessages, clearLocalDB, clearHudCache } from "./utils/localDb";
+import { applyStateUpdateToCache, getCachedStoryContext, cacheInventory } from "./utils/hudStore";
 import { syncQueue } from "./utils/syncQueue";
 
 export default function App() {
@@ -89,7 +88,6 @@ export default function App() {
   const handleLogout = () => {
     fetch(`${BASE_URL}/auth/logout`, { method: "POST", headers: authHeaders() }).catch(() => {});
     clearAuth(); setUser(null); setStoryContext(null); setView("landing");
-    // SECURITY FIX: Purge local cache to prevent cross-user data leakage
     clearLocalDB().catch(() => {});
   };
 
@@ -151,6 +149,9 @@ export default function App() {
 
       if (playData.story) await saveLocalStory(playData.story);
       await saveLocalPlaythrough(pt);
+      
+      // Phase 6: Persist HUD context to local cache for instant hydration
+      await applyStateUpdateToCache(pt.id, finalContext);
 
       const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
       let msgData = await parseJsonSafe(msgRes);
@@ -175,7 +176,13 @@ export default function App() {
       mapped.forEach(m => appendMessage(session.session_id, m));
       
       if (mapped.length > 0) await saveLocalMessages(pt.id, mapped, true);
-      if (pt.id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: pt.id }, "normal");
+      
+      // Phase 6: Queue background HUD sync and memory compression
+      if (pt.id) {
+        syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'inventory' }, 'high');
+        syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'map' }, 'high');
+        syncQueue.enqueue('COMPRESS_MEMORY', { ptId: pt.id }, 'normal');
+      }
 
     } catch (err) {
       console.error("[openStory] error:", err);
@@ -335,6 +342,14 @@ export default function App() {
               }
             }
             newContext.characters = newChars;
+            
+            // Phase 6: Persist AI state update to local HUD cache instantly
+            if (newContext.playthrough_id) {
+              applyStateUpdateToCache(newContext.playthrough_id, newContext);
+              // Queue inventory refresh since AI may have granted/removed items
+              syncQueue.enqueue('SYNC_HUD', { ptId: newContext.playthrough_id, key: 'inventory' }, 'normal');
+            }
+            
             return newContext;
           });
         } else if (event.type === "error") {
@@ -344,7 +359,9 @@ export default function App() {
           appendMessage(sessionId, finalMsg);
           setMessages((prev) => [...prev, finalMsg]);
           setStreamingMsg(null); setIsStreaming(false); setStatusText("");
-          if (storyContext?.playthrough_id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: storyContext.playthrough_id }, "normal");
+          if (storyContext?.playthrough_id) {
+            syncQueue.enqueue('COMPRESS_MEMORY', { ptId: storyContext.playthrough_id }, 'normal');
+          }
         }
       }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
     } else {
@@ -354,8 +371,7 @@ export default function App() {
         else if (event.type === "thinking") { assistantThinking += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, streamingThinking: assistantThinking, timestamp: new Date().toISOString() })); setStatusText(""); }
         else if (event.type === "content") { assistantContent += event.content; setStreamingMsg((prev) => ({ ...(prev ?? {}), id: assistantId, role: "assistant", content: assistantContent, timestamp: new Date().toISOString() })); setStatusText(""); }
         else if (event.type === "error") { setError(event.message || "Error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); }
-        else if (event.type === "done") { appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }); setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]); setStreamingMsg(null); setIsStreaming(false); setStatusText("");
-          if (storyContext?.playthrough_id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: storyContext.playthrough_id }, "normal"); refreshSessions(); }
+        else if (event.type === "done") { appendMessage(sessionId, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }); setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: assistantContent, thinking: assistantThinking || undefined, timestamp: new Date().toISOString() }]); setStreamingMsg(null); setIsStreaming(false); setStatusText(""); refreshSessions(); }
       }, (err) => { setError(err.message || "Connection error"); setIsStreaming(false); setStreamingMsg(null); setStatusText(""); });
     }
 
@@ -371,7 +387,6 @@ export default function App() {
       setMessages((prev) => [...prev, { ...streamingMsg, content: (streamingMsg.content || "") + " *(stopped)*", streamingThinking: undefined }]);
     }
     setStreamingMsg(null); setIsStreaming(false); setStatusText("");
-          if (storyContext?.playthrough_id) syncQueue.enqueue("COMPRESS_MEMORY", { ptId: storyContext.playthrough_id }, "normal");
   };
 
   const activeTitle = sessions.find((s) => s.session_id === activeSessionId)?.title ?? "InkMind";
