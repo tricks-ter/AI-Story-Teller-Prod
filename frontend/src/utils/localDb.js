@@ -1,7 +1,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'inkmind_local';
-const DB_VERSION = 2;
+const DB_VERSION = 3; // Bumped for Phase 7 world_nodes store
 
 let dbPromise = null;
 
@@ -26,10 +26,15 @@ export function getDB() {
         if (!db.objectStoreNames.contains('library_feed')) {
           db.createObjectStore('library_feed', { keyPath: 'user_id' });
         }
-        // Phase 6: HUD state cache for lightning-fast inventory/map/stats
         if (!db.objectStoreNames.contains('hud_cache')) {
           const hudStore = db.createObjectStore('hud_cache', { keyPath: 'cache_key' });
           hudStore.createIndex('playthrough_id', 'playthrough_id');
+        }
+        // Phase 7: World Node Graph Store
+        if (oldVersion < 3) {
+          const worldStore = db.createObjectStore('world_nodes', { keyPath: 'id' });
+          worldStore.createIndex('playthrough_id', 'playthrough_id');
+          worldStore.createIndex('parent_id', 'parent_id');
         }
       }
     });
@@ -147,10 +152,33 @@ export async function clearHudCache(playthroughId) {
   } catch (e) { console.warn('[hudCache] clear failed', e); }
 }
 
+// --- PHASE 7: WORLD GRAPH CACHE ---
+export async function getLocalWorldNodes(playthroughId, parentId = null) {
+  const db = await getDB();
+  if (parentId) {
+    return await db.getAllFromIndex('world_nodes', 'parent_id', parentId);
+  }
+  return await db.getAllFromIndex('world_nodes', 'playthrough_id', playthroughId);
+}
+
+export async function saveLocalWorldNodes(playthroughId, nodes) {
+  const db = await getDB();
+  const tx = db.transaction('world_nodes', 'readwrite');
+  const index = tx.store.index('playthrough_id');
+  // Clear existing nodes for this playthrough to prevent stale graph data
+  for await (const cursor of index.iterate(playthroughId)) {
+    await cursor.delete();
+  }
+  for (const node of nodes) {
+    await tx.store.put({ ...node, playthrough_id: playthroughId });
+  }
+  await tx.done;
+}
+
 // --- SECURITY / LIFECYCLE ---
 export async function clearLocalDB() {
   const db = await getDB();
-  const storeNames = ['user_session', 'stories', 'playthroughs', 'messages', 'library_feed', 'hud_cache'];
+  const storeNames = ['user_session', 'stories', 'playthroughs', 'messages', 'library_feed', 'hud_cache', 'world_nodes'];
   const tx = db.transaction(storeNames, 'readwrite');
   for (const name of storeNames) {
     await tx.objectStore(name).clear();

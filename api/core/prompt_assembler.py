@@ -79,6 +79,31 @@ Time of Day: {pt['time_of_day']}
         if meta.get("current_location"):
             world += f"Current Location: {meta['current_location']}\n"
 
+        # PHASE 7: Procedural World Expansion Context
+        loc_name = meta.get("current_location")
+        if loc_name:
+            node_ctx = db.get_node_context_for_location(self.playthrough_id, loc_name)
+            if node_ctx:
+                node = node_ctx["node"]
+                children = node_ctx["children"]
+                node_meta = node.get("metadata") or {}
+                world += f"\n[LOCAL ENVIRONMENT: {node['name']}]\n"
+                if node_meta.get("description"):
+                    world += f"Description: {node_meta['description']}\n"
+                if node_meta.get("economy"):
+                    world += f"Economy: {node_meta['economy']}\n"
+                if node_meta.get("politics"):
+                    world += f"Politics/Factions: {node_meta['politics']}\n"
+                
+                if children:
+                    world += "Local Entities:\n"
+                    for child in children:
+                        cmeta = child.get("metadata") or {}
+                        desc = cmeta.get("description", "")
+                        world += f"- {child['node_type'].upper()}: {child['name']}"
+                        if desc: world += f" ({desc})"
+                        world += "\n"
+
         world += "\nActive Characters:\n"
         for c in characters:
             cmeta = c.get("metadata") or {}

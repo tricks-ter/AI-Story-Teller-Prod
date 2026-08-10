@@ -1,4 +1,4 @@
-import { saveLocalLibrary, saveLocalStory, saveLocalPlaythrough, saveLocalMessages, setHudCache } from './localDb';
+import { saveLocalLibrary, saveLocalStory, saveLocalPlaythrough, saveLocalMessages, setHudCache, saveLocalWorldNodes } from './localDb';
 import { authHeaders, BASE_URL, parseJsonSafe } from './auth';
 
 class FIFOQueue {
@@ -100,6 +100,18 @@ class FIFOQueue {
         if (!res.ok) console.warn(`[HUD_ACTION] ${action} failed on server`);
       } catch (e) {
         console.warn('[HUD_ACTION] error', e);
+      }
+    };
+
+    // Phase 7: Sync Procedural World Graph from cloud
+    this.processors['SYNC_WORLD_NODES'] = async (payload) => {
+      const { ptId } = payload;
+      const res = await fetch(`${BASE_URL}/playthroughs/${ptId}/world-nodes`, { headers: authHeaders() });
+      if (res.ok) {
+        const data = await parseJsonSafe(res);
+        if (Array.isArray(data)) {
+          await saveLocalWorldNodes(ptId, data);
+        }
       }
     };
   }

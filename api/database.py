@@ -843,135 +843,113 @@ class Database:
             return True
         return self._with_conn(fn, commit=True) is True
 
-    # ── Phase 6: Story Editing ──
-    def update_story_metadata(self, story_id, title, genre, premise, is_public):
-        try:
-            self.execute_query(
-                "UPDATE stories SET title = %s, genre = %s, premise = %s, is_public = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                (title, genre, premise, bool(is_public), story_id),
-                fetch="none", commit=True)
-        except Exception:
-            self.execute_query(
-                "UPDATE stories SET title = %s, genre = %s, premise = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                (title, genre, premise, story_id),
-                fetch="none", commit=True)
-
-    # ── Phase 6: N+1 Query Eliminator ──
+    # ── Phase 6: Dynamic Context & Memory ──
     def get_full_playthrough_state(self, playthrough_id):
+        """Batch loader to eliminate N+1 queries for PromptAssembler."""
         chars = self.get_playthrough_characters(playthrough_id)
-        if not chars: return {"characters": [], "items": [], "equipment": [], "backpacks": []}
-        
-        items = self.execute_query(
-            "SELECT id, character_id, name, item_type, slot, rarity, item_level, weight, quantity, metadata "
-            "FROM playthrough_items WHERE playthrough_id = %s",
-            (playthrough_id,), fetch="all") or []
-            
-        equipment = self.execute_query(
-            "SELECT pe.character_id, pe.item_id, pe.slot, pi.name AS item_name, pi.rarity, pi.item_level, pi.metadata "
-            "FROM playthrough_equipment pe JOIN playthrough_items pi ON pi.id = pe.item_id "
-            "WHERE pe.playthrough_id = %s",
-            (playthrough_id,), fetch="all") or []
-            
-        backpacks = self.execute_query(
-            "SELECT id, character_id, level FROM playthrough_backpacks WHERE playthrough_id = %s",
-            (playthrough_id,), fetch="all") or []
-            
-        return {"characters": chars, "items": items, "equipment": equipment, "backpacks": backpacks}
+        items = self.list_playthrough_items(playthrough_id)
+        equipment = self.list_playthrough_equipment(playthrough_id)
+        backpacks = self.list_playthrough_backpacks(playthrough_id)
+        return {
+            "characters": chars,
+            "items": items,
+            "equipment": equipment,
+            "backpacks": backpacks
+        }
 
-    # ── Phase 6: Memory, Lorebook, and Nudges ──
-    def get_recent_messages_for_context(self, playthrough_id, max_chars=40000):
-        msgs = self.execute_query(
-            "SELECT id, role, content FROM story_messages WHERE playthrough_id = %s ORDER BY id ASC",
-            (playthrough_id,), fetch="all") or []
-        
-        selected = []
-        current_chars = 0
-        for m in reversed(msgs):
-            msg_len = len(m["content"]) + 10
-            if current_chars + msg_len > max_chars and selected:
-                break
-            selected.append(m)
-            current_chars += msg_len
-            
-        return list(reversed(selected))
-
-    def update_memory_summary(self, playthrough_id, summary):
-        self.execute_query(
-            "UPDATE playthroughs SET memory_summary = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-            (summary, playthrough_id), fetch="none", commit=True)
+    def get_recent_messages_for_context(self, playthrough_id, max_chars):
+        """Fills context backwards from newest until max_chars is reached."""
+        def fn(cur):
+            cur.execute(
+                "SELECT id, role, content FROM story_messages WHERE playthrough_id = %s ORDER BY id DESC",
+                (playthrough_id,))
+            rows = cur.fetchall() or []
+            selected = []
+            current_len = 0
+            for r in rows:
+                msg_len = len(r["content"]) + 20
+                if current_len + msg_len > max_chars * 0.6:
+                    break
+                selected.insert(0, r)
+                current_len += msg_len
+            return selected
+        return self._with_conn(fn) or []
 
     def get_memory_summary(self, playthrough_id):
-        row = self.execute_query("SELECT memory_summary FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
-        return row["memory_summary"] if row and row.get("memory_summary") else ""
-
-    def append_lorebook_entry(self, playthrough_id, entry_dict):
-        def fn(cur):
-            cur.execute("SELECT lorebook FROM playthroughs WHERE id = %s", (playthrough_id,))
-            row = cur.fetchone()
-            lore = row["lorebook"] if row and isinstance(row.get("lorebook"), list) else []
-            if "title" in entry_dict:
-                lore = [l for l in lore if l.get("title") != entry_dict["title"]]
-            lore.append(entry_dict)
-            lore = lore[-50:]
-            cur.execute("UPDATE playthroughs SET lorebook = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                        (json.dumps(lore), playthrough_id))
-        self._with_conn(fn, commit=True)
+        pt = self.get_playthrough(playthrough_id)
+        if not pt: return ""
+        meta = pt.get("metadata") or {}
+        return meta.get("memory_summary", "")
 
     def get_lorebook(self, playthrough_id):
-        row = self.execute_query("SELECT lorebook FROM playthroughs WHERE id = %s", (playthrough_id,), fetch="one")
-        return row["lorebook"] if row and isinstance(row.get("lorebook"), list) else []
-
-    def set_active_nudge(self, playthrough_id, nudge):
-        self.execute_query(
-            "UPDATE playthroughs SET active_nudge = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-            (nudge, playthrough_id), fetch="none", commit=True)
+        pt = self.get_playthrough(playthrough_id)
+        if not pt: return []
+        meta = pt.get("metadata") or {}
+        return meta.get("lorebook", [])
 
     def get_and_clear_nudge(self, playthrough_id):
         def fn(cur):
-            cur.execute("SELECT active_nudge FROM playthroughs WHERE id = %s", (playthrough_id,))
+            cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
             row = cur.fetchone()
-            nudge = row["active_nudge"] if row and row.get("active_nudge") else ""
+            if not row: return None
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            nudge = meta.pop("active_nudge", None)
             if nudge:
-                cur.execute("UPDATE playthroughs SET active_nudge = '' WHERE id = %s", (playthrough_id,))
+                cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                            (json.dumps(meta), playthrough_id))
             return nudge
-        return self._with_conn(fn, commit=True) or ""
+        return self._with_conn(fn, commit=True)
 
-# ── Module-level instance and helpers ──
+    # ── Phase 7: Procedural World Expansion ──
+    def get_world_nodes(self, playthrough_id, parent_id=None):
+        if parent_id:
+            return self.execute_query(
+                "SELECT id, parent_id, node_type, name, metadata, created_at "
+                "FROM world_nodes WHERE playthrough_id = %s AND parent_id = %s ORDER BY created_at ASC",
+                (playthrough_id, parent_id), fetch="all") or []
+        return self.execute_query(
+            "SELECT id, parent_id, node_type, name, metadata, created_at "
+            "FROM world_nodes WHERE playthrough_id = %s ORDER BY created_at ASC",
+            (playthrough_id,), fetch="all") or []
+
+    def bulk_insert_world_nodes(self, playthrough_id, parent_id, nodes):
+        """nodes is a list of dicts: {node_type, name, metadata}"""
+        if not nodes: return True
+        def fn(cur):
+            for node in nodes:
+                ntype = node.get("node_type", "location")
+                name = node.get("name", "Unknown")
+                meta = json.dumps(node.get("metadata", {}))
+                cur.execute(
+                    "INSERT INTO world_nodes (id, playthrough_id, parent_id, node_type, name, metadata, created_at, updated_at) "
+                    "VALUES (substr(md5(random()::text), 1, 36), %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (playthrough_id, node_type, LOWER(name)) DO NOTHING",
+                    (playthrough_id, parent_id, ntype, name, meta))
+            return True
+        return self._with_conn(fn, commit=True) is True
+
+    def get_node_context_for_location(self, playthrough_id, location_name):
+        """Fetches the node and its immediate children for prompt injection."""
+        def fn(cur):
+            cur.execute(
+                "SELECT id, parent_id, node_type, name, metadata FROM world_nodes "
+                "WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
+                (playthrough_id, location_name))
+            node = cur.fetchone()
+            if not node: return None
+            
+            cur.execute(
+                "SELECT id, node_type, name, metadata FROM world_nodes "
+                "WHERE parent_id = %s ORDER BY created_at ASC LIMIT 20",
+                (node["id"],))
+            children = cur.fetchall() or []
+            
+            return {"node": node, "children": children}
+        return self._with_conn(fn)
+
 db = Database()
 
 try:
     db.init_tables()
 except Exception as e:
     logger.error(f"DB init warning: {e}")
-
-def set_story_art(story_id, kind, data_url):
-    col = "cover_image" if kind == "cover" else "banner_image"
-    db.execute_query(
-        "UPDATE stories SET " + col + " = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-        (data_url, story_id), fetch="none", commit=True)
-    return True
-
-def set_character_image(character_id, data_url):
-    db.execute_query(
-        "UPDATE story_characters SET image = %s WHERE id = %s",
-        (data_url, character_id), fetch="none", commit=True)
-    return True
-
-def get_stories_art(ids):
-    if not ids:
-        return {}
-    rows = db.execute_query(
-        "SELECT id, cover_image, banner_image FROM stories WHERE id = ANY(%s)",
-        (list(ids),), fetch="all")
-    if rows is None:
-        return {i: {"cover_image": "", "banner_image": ""} for i in ids}
-    return {r["id"]: {"cover_image": r.get("cover_image") or "", "banner_image": r.get("banner_image") or ""} for r in rows}
-
-def get_cast_with_images(story_id):
-    rows = db.execute_query(
-        "SELECT id, name, role, background, is_player, image FROM story_characters "
-        "WHERE story_id = %s ORDER BY is_player DESC, created_at ASC",
-        (story_id,), fetch="all")
-    if rows is None:
-        return db.get_story_characters(story_id)
-    return [dict(r, image=r.get("image") or "") for r in rows]
