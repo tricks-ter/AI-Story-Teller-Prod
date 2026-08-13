@@ -245,11 +245,15 @@ class Database:
 
     def list_stories_for_user(self, user_id):
         if not self.database_url: return []
+        # Include creator_id + creator_name so the "My Creations" tab shows author + ownership
         return self.execute_query(
             "SELECT s.id, s.title, s.genre, s.premise, s.current_day, s.time_of_day, s.is_premium, s.is_public, s.updated_at, "
+            "s.creator_id, u.username AS creator_name, "
             "(SELECT sc.name FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_name, "
-            "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role "
-            "FROM stories s WHERE s.creator_id = %s ORDER BY s.updated_at DESC",
+            "(SELECT sc.role FROM story_characters sc WHERE sc.story_id = s.id AND sc.is_player = TRUE ORDER BY sc.created_at ASC LIMIT 1) AS character_role, "
+            "(SELECT COUNT(*) FROM playthroughs p WHERE p.story_id = s.id) AS played_count "
+            "FROM stories s LEFT JOIN users u ON u.id = s.creator_id "
+            "WHERE s.creator_id = %s ORDER BY s.updated_at DESC",
             (user_id,), fetch="all") or []
 
     def list_all_stories(self, user_id):

@@ -8,6 +8,7 @@ import LandingPage from "./components/LandingPage";
 import StoryCreator from "./components/StoryCreator";
 import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
+import StoryDetails from "./components/StoryDetails";
 import HUD from "./components/HUD";
 import { streamChat, streamStory, completePlaythrough } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
@@ -21,6 +22,7 @@ export default function App() {
   const [storyContext, setStoryContext] = useState(null);
   const [user, setUser] = useState(getSavedUser());
   const [pendingAction, setPendingAction] = useState(null);
+  const [detailsStory, setDetailsStory] = useState(null);
 
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
@@ -108,23 +110,21 @@ export default function App() {
     }
   };
 
-  const handleOpenStory = async (story) => {
-    const cachedStory = await getLocalStory(story.id);
-    if (cachedStory) {
-       setStoryContext({ ...cachedStory, ...story });
-       const cachedMsgs = await getLocalMessages(story.playthrough_id || story.id);
-       if (cachedMsgs.length > 0) setMessages(cachedMsgs.map(m => ({...m, narrative: true, role: m.role === 'system' ? 'assistant' : m.role})));
-    } else {
-       setStoryContext(story);
-    }
-    
+  // Library click -> detail review (no longer jumps straight to chat)
+  const handleOpenStory = (story) => {
+    setDetailsStory(story);
+    setView("details");
+  };
+
+  // From detail page: user tapped Continue/New Journey -> enter the saga
+  const handleStartJourney = async (story) => {
+    setStoryContext(story);
     setView("chat");
     const session = createSession();
     refreshSessions();
     setActiveSessionId(session.session_id);
     setStreamingMsg(null); setStatusText(""); setError(null); setNotice(null); setSidebarOpen(false);
-    
-    if (!cachedStory) setMessages([]);
+    setMessages([]);
 
     try {
       const playRes = await fetch(`${BASE_URL}/stories/${story.id}/play`, {
@@ -149,8 +149,6 @@ export default function App() {
 
       if (playData.story) await saveLocalStory(playData.story);
       await saveLocalPlaythrough(pt);
-      
-      // Phase 6: Persist HUD context to local cache for instant hydration
       await applyStateUpdateToCache(pt.id, finalContext);
 
       const msgRes = await fetch(`${BASE_URL}/playthroughs/${pt.id}/messages?limit=100`, { headers: authHeaders() });
@@ -174,23 +172,20 @@ export default function App() {
       
       setMessages(mapped);
       mapped.forEach(m => appendMessage(session.session_id, m));
-      
       if (mapped.length > 0) await saveLocalMessages(pt.id, mapped, true);
-      
-      // Phase 6: Queue background HUD sync and memory compression
+
       if (pt.id) {
         syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'inventory' }, 'high');
         syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'map' }, 'high');
+        syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'world' }, 'normal');
         syncQueue.enqueue('COMPRESS_MEMORY', { ptId: pt.id }, 'normal');
       }
 
     } catch (err) {
-      console.error("[openStory] error:", err);
-      if (!cachedStory) {
-        setStoryContext(null);
-        setMessages([]);
-        setView("library");
-      }
+      console.error("[startJourney] error:", err);
+      setStoryContext(null);
+      setMessages([]);
+      setView("details");
       setError(describeNetworkError(err));
     }
   };
@@ -205,8 +200,8 @@ export default function App() {
       });
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
-      setStoryContext({ ...storyData, id: data.story_id });
-      setView("library");
+      setDetailsStory({ ...storyData, id: data.story_id });
+      setView("details");
     } catch (err) {
       console.error("Failed to create story", err);
       setError(describeNetworkError(err));
@@ -220,7 +215,6 @@ export default function App() {
         title: storyData.title,
         genre: storyData.genre,
         premise: storyData.premise,
-        isPublic: true 
       });
       const res = await fetch(`${BASE_URL}/stories/${storyId}`, {
         method: "PATCH",
@@ -230,12 +224,14 @@ export default function App() {
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
       setEditingStory(null);
-      setView("library");
+      // Refresh detail page with updated data
+      setDetailsStory(prev => prev && prev.id === storyId ? { ...prev, ...storyData } : prev);
+      setView("details");
     } catch (err) {
       console.error("Failed to update story", err);
       setError(describeNetworkError(err));
       setEditingStory(null);
-      setView("library");
+      setView("details");
     }
   };
 
@@ -343,11 +339,10 @@ export default function App() {
             }
             newContext.characters = newChars;
             
-            // Phase 6: Persist AI state update to local HUD cache instantly
             if (newContext.playthrough_id) {
               applyStateUpdateToCache(newContext.playthrough_id, newContext);
-              // Queue inventory refresh since AI may have granted/removed items
               syncQueue.enqueue('SYNC_HUD', { ptId: newContext.playthrough_id, key: 'inventory' }, 'normal');
+              syncQueue.enqueue('SYNC_HUD', { ptId: newContext.playthrough_id, key: 'world' }, 'normal');
             }
             
             return newContext;
@@ -394,9 +389,10 @@ export default function App() {
 
   if (view === "landing") return <LandingPage onSelectChat={() => requireAuth("chat")} onSelectStory={() => requireAuth("story")} user={user} onSignIn={() => { setPendingAction(null); setView("auth"); }} onLogout={handleLogout} />;
   if (view === "auth") return <AuthPage onAuthed={handleAuthed} onBack={() => setView("landing")} />;
-  if (view === "library") return <StoryLibrary user={user} onOpenStory={handleOpenStory} onNewStory={() => setView("storySetup")} onEditStory={(s) => { setEditingStory(s); setView("storyEdit"); }} onBack={() => setView("landing")} />;
+  if (view === "library") return <StoryLibrary user={user} onOpenStory={handleOpenStory} onNewStory={() => setView("storySetup")} onBack={() => setView("landing")} />;
+  if (view === "details") return <StoryDetails story={detailsStory} user={user} onBack={() => { setDetailsStory(null); setView("library"); }} onStartJourney={handleStartJourney} onEdit={(s) => { setEditingStory(s); setView("storyEdit"); }} />;
   if (view === "storySetup") return <StoryCreator onStart={handleStartStory} onBack={() => setView("library")} />;
-  if (view === "storyEdit") return <StoryCreator initialData={editingStory} isEditing={true} onUpdate={handleUpdateStory} onBack={() => { setEditingStory(null); setView("library"); }} />;
+  if (view === "storyEdit") return <StoryCreator initialData={editingStory} isEditing={true} onUpdate={handleUpdateStory} onBack={() => { setEditingStory(null); setView("details"); }} />;
 
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">
@@ -450,7 +446,7 @@ export default function App() {
           <div className="flex items-center gap-2 px-4 py-3 bg-purple-500/10 border-b border-purple-500/20 text-purple-300 text-sm flex-shrink-0">
             <Trophy size={15} className="flex-shrink-0" />
             <span className="flex-1 text-[13px] sm:text-sm">This saga is complete.</span>
-            <button onClick={() => handleOpenStory(storyContext)} className="px-3 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold min-h-[44px] touch-manipulation active:scale-95">
+            <button onClick={() => handleStartJourney(storyContext)} className="px-3 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold min-h-[44px] touch-manipulation active:scale-95">
               Start New Journey
             </button>
           </div>

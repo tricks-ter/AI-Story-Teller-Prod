@@ -86,7 +86,18 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
 
     const artRes = results[3];
     if (artRes.status === 'fulfilled' && artRes.value.ok) {
-      try { setArt((await parseJsonSafe(artRes.value)) || {}); } catch { /* non-fatal */ }
+      try {
+        const artData = await parseJsonSafe(artRes.value);
+        // Art endpoint now returns {id: {cover, banner}}
+        const flat = {};
+        if (artData && typeof artData === 'object') {
+          for (const [k, v] of Object.entries(artData)) {
+            if (v && typeof v === 'object') flat[k] = v.cover || '';
+            else if (typeof v === 'string') flat[k] = v;
+          }
+        }
+        setArt(flat);
+      } catch { /* non-fatal */ }
     }
 
     if (errs.length) setError(errs.join('  •  '));
@@ -122,15 +133,30 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const renderCard = (s, isHistory) => {
     const sid = s.story_id || s.id;
     const cover = art[sid];
-    const isOwner = !isHistory && s.creator_id === user?.id;
+    // Author is always available now: list_all_stories + list_stories_for_user both return creator_name
+    const authorName = s.creator_name || (isHistory ? null : (user?.username || null));
+    // Pass the full row so StoryDetails has everything it needs
+    const payload = {
+      id: sid,
+      story_id: s.story_id,
+      title: s.title,
+      genre: s.genre,
+      premise: s.premise,
+      character_name: s.character_name,
+      character_role: s.character_role,
+      creator_id: s.creator_id,
+      creator_name: s.creator_name,
+      is_public: s.is_public,
+      played_count: s.played_count || 0,
+      current_day: s.current_day,
+      time_of_day: s.time_of_day,
+      playthrough_id: isHistory ? s.playthrough_id : undefined,
+    };
     return (
-      <div
+      <button
         key={isHistory ? s.playthrough_id : s.id}
-        role="button"
-        tabIndex={0}
-        onClick={() => onOpenStory({ id: sid, title: s.title, genre: s.genre, premise: s.premise, character_name: s.character_name })}
-        onKeyDown={e => { if (e.key === 'Enter') onOpenStory({ id: sid, title: s.title, genre: s.genre, premise: s.premise, character_name: s.character_name }); }}
-        className="bg-gray-900/60 border border-gray-800 hover:border-purple-500/50 rounded-2xl p-4 text-left transition-all active:scale-95 touch-manipulation cursor-pointer"
+        onClick={() => onOpenStory(payload)}
+        className="bg-gray-900/60 border border-gray-800 hover:border-purple-500/50 rounded-2xl p-4 text-left transition-all active:scale-95 touch-manipulation"
       >
         {cover ? (
           <div className="h-32 rounded-xl overflow-hidden mb-3 bg-gray-800 relative">
@@ -144,7 +170,7 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
         <div className="flex items-center justify-between mb-2">
           <span className="text-[10px] font-bold uppercase tracking-wide text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">{s.genre}</span>
           <span className="flex items-center gap-2">
-            {isOwner && (
+            {!isHistory && authorName === user?.username && (
               <button
                 onClick={e => { e.stopPropagation(); uploadTarget.current = sid; fileRef.current?.click(); }}
                 className="min-w-[44px] min-h-[32px] px-2 flex items-center justify-center gap-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-[10px] touch-manipulation active:scale-95"
@@ -160,10 +186,10 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
         <p className="text-sm text-gray-500 line-clamp-2 mt-1">{s.premise}</p>
         <p className="text-xs text-gray-400 mt-3 truncate">
           {s.character_name ? `${s.character_name} · ` : ""}
-          {s.creator_name ? `by ${s.creator_name} · ` : ""}
+          {authorName ? `by ${authorName} · ` : ""}
           {isHistory ? `Day ${s.current_day} · ${s.time_of_day}` : (s.played_count > 0 ? 'Played' : 'New')}
         </p>
-      </div>
+      </button>
     );
   };
 
