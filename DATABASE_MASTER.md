@@ -53,3 +53,11 @@ Backpack capacity 5+5×level; equipped weigh nothing; quest undroppable; stackab
 
 ## 8. MAINTENANCE RULES
 New table → §2 + §1 + §4 rows. New JSONB key → note under table. Never drop/rename columns without user-approved plan.
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+Migration 0014_social.sql (deploy-time):
+- story_likes(story_id FK CASCADE, user_id FK CASCADE, created_at; PK(story_id,user_id)) — one like per user per story; idx(story_id).
+- story_comments(id SERIAL PK, story_id FK CASCADE, user_id FK CASCADE, username VARCHAR(80) DEFAULT 'Adventurer' (snapshot), content TEXT DEFAULT '', created_at) — idx(story_id, created_at DESC).
+Relations: stories 1-N story_likes | story_comments.
+Method → table additions (api/db_ext.py): toggle_story_like / get_story_social / get_all_story_social_counts → story_likes+story_comments · add_story_comment / delete_story_comment → story_comments · delete_story_full → stories (cascade).
+Invariants: deleting a story cascades ALL related rows (characters, messages, notes, playthroughs, likes, comments); comment deletion allowed for comment author or story author (legacy-claim included); username is denormalized on comments so display survives user changes.

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { ArrowLeft, BookOpen, Plus, Clock, History, Globe, User, Image as ImageIcon } from 'lucide-react';
+import { ArrowLeft, BookOpen, Plus, Clock, History, Globe, User, Image as ImageIcon, Heart, MessageCircle } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkError } from '../utils/auth';
 
 function timeAgo(iso) {
@@ -39,6 +39,7 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const [myStories, setMyStories] = useState(null);
   const [history, setHistory] = useState(null);
   const [art, setArt] = useState({});
+  const [social, setSocial] = useState({});
   const [error, setError] = useState(null);
   const fileRef = useRef(null);
   const uploadTarget = useRef(null);
@@ -53,6 +54,7 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
       fetch(`${BASE_URL}/stories?scope=mine`, { headers: authHeaders(), signal: controller.signal }),
       fetch(`${BASE_URL}/playthroughs`, { headers: authHeaders(), signal: controller.signal }),
       fetch(`${BASE_URL}/stories/art`, { headers: authHeaders(), signal: controller.signal }),
+      fetch(`${BASE_URL}/stories/social`, { headers: authHeaders(), signal: controller.signal }),
     ];
 
     const results = await Promise.allSettled(jobs);
@@ -88,7 +90,6 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
     if (artRes.status === 'fulfilled' && artRes.value.ok) {
       try {
         const artData = await parseJsonSafe(artRes.value);
-        // Art endpoint now returns {id: {cover, banner}}
         const flat = {};
         if (artData && typeof artData === 'object') {
           for (const [k, v] of Object.entries(artData)) {
@@ -97,6 +98,14 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
           }
         }
         setArt(flat);
+      } catch { /* non-fatal */ }
+    }
+
+    const socRes = results[4];
+    if (socRes.status === 'fulfilled' && socRes.value.ok) {
+      try {
+        const socData = await parseJsonSafe(socRes.value);
+        if (socData && typeof socData === 'object') setSocial(socData);
       } catch { /* non-fatal */ }
     }
 
@@ -133,9 +142,8 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const renderCard = (s, isHistory) => {
     const sid = s.story_id || s.id;
     const cover = art[sid];
-    // Author is always available now: list_all_stories + list_stories_for_user both return creator_name
+    const soc = social[sid];
     const authorName = s.creator_name || (isHistory ? null : (user?.username || null));
-    // Pass the full row so StoryDetails has everything it needs
     const payload = {
       id: sid,
       story_id: s.story_id,
@@ -184,10 +192,16 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
         </div>
         <h3 className="text-lg font-semibold text-white truncate">{s.title}</h3>
         <p className="text-sm text-gray-500 line-clamp-2 mt-1">{s.premise}</p>
-        <p className="text-xs text-gray-400 mt-3 truncate">
-          {s.character_name ? `${s.character_name} · ` : ""}
-          {authorName ? `by ${authorName} · ` : ""}
-          {isHistory ? `Day ${s.current_day} · ${s.time_of_day}` : (s.played_count > 0 ? 'Played' : 'New')}
+        <p className="text-xs text-gray-400 mt-3 truncate flex items-center gap-1.5 flex-wrap">
+          {s.character_name ? <span>{s.character_name} ·</span> : null}
+          {authorName ? <span>by {authorName} ·</span> : null}
+          {isHistory ? <span>Day {s.current_day} · {s.time_of_day}</span> : <span>{s.played_count > 0 ? 'Played' : 'New'}</span>}
+          {!isHistory && soc && (soc.likes > 0 || soc.comments > 0) && (
+            <span className="flex items-center gap-1.5 text-gray-500">
+              {soc.likes > 0 && <span className="flex items-center gap-0.5"><Heart size={10} className="text-pink-400" /> {soc.likes}</span>}
+              {soc.comments > 0 && <span className="flex items-center gap-0.5"><MessageCircle size={10} className="text-blue-400" /> {soc.comments}</span>}
+            </span>
+          )}
         </p>
       </button>
     );

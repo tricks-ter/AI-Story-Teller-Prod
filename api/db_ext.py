@@ -1,5 +1,5 @@
 """Phase 7B additive module: story art, story metadata edits, living-world state,
-world event ledger, inventory dedupe/stacking, memory summaries.
+world event ledger, inventory dedupe/stacking, memory summaries, social layer.
 Kept separate from database.py to stay purely additive (no rewrite risk)."""
 import json
 import uuid
@@ -45,7 +45,6 @@ def set_character_image(story_id, character_name, image):
         (image or "", story_id, character_name), fetch="none", commit=True)
 
 def set_character_image_by_id(story_id, char_id, image):
-    """Portrait upload by character id, scoped to the story. False if not found."""
     try:
         row = db.execute_query(
             "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
@@ -66,7 +65,6 @@ def get_cast_with_images(story_id):
         "ORDER BY is_player DESC, created_at ASC", (story_id,), fetch="all") or []
 
 def update_story_character(story_id, char_id, fields):
-    """Edit template character (name/role/background). Safe: playthroughs keep copies."""
     try:
         row = db.execute_query(
             "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
@@ -89,7 +87,6 @@ def update_story_character(story_id, char_id, fields):
         return False
 
 def set_story_metadata_keys(story_id, updates):
-    """Merge scalar keys (starter_location, tone, ...) into stories.metadata."""
     try:
         def fn(cur):
             cur.execute("SELECT metadata FROM stories WHERE id = %s", (story_id,))
@@ -107,7 +104,6 @@ def set_story_metadata_keys(story_id, updates):
         return False
 
 def can_manage_story(story, user_id):
-    """Owner — or anyone may adopt a legacy (pre-auth) story."""
     owner = story.get("creator_id")
     return owner == user_id or owner in (None, "", LEGACY_USER_ID)
 
@@ -124,6 +120,87 @@ def update_story_fields(story_id, fields):
                      tuple(params), fetch="none", commit=True)
     return True
 
+def delete_story_full(story_id):
+    """FK ON DELETE CASCADE removes characters, messages, notes, playthroughs, likes, comments."""
+    try:
+        db.execute_query("DELETE FROM stories WHERE id = %s", (story_id,), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"delete_story_full failed: {e}")
+        return False
+
+# ── Social: Likes & Comments (0014) ──
+def toggle_story_like(story_id, user_id):
+    def fn(cur):
+        cur.execute("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+        exists = cur.fetchone()
+        if exists:
+            cur.execute("DELETE FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+            liked = False
+        else:
+            cur.execute("INSERT INTO story_likes (story_id, user_id, created_at) VALUES (%s, %s, CURRENT_TIMESTAMP)",
+                        (story_id, user_id))
+            liked = True
+        cur.execute("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,))
+        count = int(cur.fetchone()["c"])
+        return {"liked": liked, "like_count": count}
+    return db._with_conn(fn, commit=True) or {"liked": False, "like_count": 0}
+
+def get_story_social(story_id, user_id):
+    try:
+        likes = db.execute_query("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,), fetch="one")
+        mine = db.execute_query("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s",
+                                (story_id, user_id), fetch="one")
+        comments = db.execute_query(
+            "SELECT id, user_id, username, content, created_at FROM story_comments "
+            "WHERE story_id = %s ORDER BY created_at DESC LIMIT 50",
+            (story_id,), fetch="all") or []
+        return {"liked": mine is not None, "like_count": int(likes["c"]) if likes else 0, "comments": comments}
+    except Exception as e:
+        logger.error(f"get_story_social failed: {e}")
+        return {"liked": False, "like_count": 0, "comments": []}
+
+def add_story_comment(story_id, user_id, username, content):
+    try:
+        return db.execute_query(
+            "INSERT INTO story_comments (story_id, user_id, username, content, created_at) "
+            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING id, created_at",
+            (story_id, user_id, username or "Adventurer", content), fetch="one", commit=True)
+    except Exception as e:
+        logger.error(f"add_story_comment failed: {e}")
+        return None
+
+def delete_story_comment(comment_id, user_id, story_owner_id=None):
+    """Allowed for the comment author or the story author (legacy-claim included)."""
+    try:
+        def fn(cur):
+            cur.execute("SELECT user_id FROM story_comments WHERE id = %s", (comment_id,))
+            row = cur.fetchone()
+            if not row: return False
+            is_comment_author = row["user_id"] == user_id
+            is_story_owner = story_owner_id is not None and (story_owner_id == user_id or story_owner_id in (None, "", LEGACY_USER_ID))
+            if not (is_comment_author or is_story_owner): return False
+            cur.execute("DELETE FROM story_comments WHERE id = %s", (comment_id,))
+            return True
+        return db._with_conn(fn, commit=True) is True
+    except Exception as e:
+        logger.error(f"delete_story_comment failed: {e}")
+        return False
+
+def get_all_story_social_counts():
+    try:
+        likes = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_likes GROUP BY story_id", fetch="all") or []
+        comments = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_comments GROUP BY story_id", fetch="all") or []
+        out = {}
+        for r in likes:
+            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["likes"] = int(r["c"])
+        for r in comments:
+            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["comments"] = int(r["c"])
+        return out
+    except Exception as e:
+        logger.error(f"get_all_story_social_counts failed: {e}")
+        return {}
+
 # ── Inventory: stacking & self-healing dedupe ──
 def find_stackable_item(playthrough_id, character_id, name):
     return db.execute_query(
@@ -139,7 +216,6 @@ def bump_item_quantity(playthrough_id, item_id, qty=1):
     return True
 
 def dedupe_stackables(playthrough_id):
-    """Merge duplicate stackable rows (same character + name). Idempotent & cheap."""
     try:
         def fn(cur):
             cur.execute(
@@ -183,7 +259,6 @@ def get_world_nodes_full(playthrough_id):
         return db.get_world_nodes(playthrough_id)
 
 def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
-    """Create-if-missing so map/world stays persistent. Never overwrites state."""
     try:
         def fn(cur):
             cur.execute(
@@ -212,7 +287,6 @@ def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
         return None
 
 def update_world_node_state(playthrough_id, node_name, updates):
-    """Upsert an entity and apply state changes. Signed values = deltas."""
     try:
         def fn(cur):
             cur.execute(

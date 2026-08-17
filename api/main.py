@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.5.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.6.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -132,6 +132,9 @@ class CharacterUpdateRequest(BaseModel):
     name: Optional[str] = None
     role: Optional[str] = None
     background: Optional[str] = None
+
+class StoryCommentRequest(BaseModel):
+    content: str
 
 router = APIRouter(prefix="/api")
 
@@ -249,21 +252,16 @@ def list_stories(raw: Request, scope: str = "all"):
         return db.list_stories_for_user(user["id"])
     return db.list_all_stories(user["id"])
 
-# NOTE: declared BEFORE /stories/{story_id} so "art" is not captured as a story id.
+# NOTE: declared BEFORE /stories/{story_id} so literals are not captured as a story id.
 @router.get("/stories/art")
 def stories_art(raw: Request):
     user = require_user(raw)
     return db_ext.get_all_story_art()
 
-# utils/art.js filtered art map
-@router.get("/art/stories")
-def art_stories(raw: Request, ids: str = ""):
+@router.get("/stories/social")
+def stories_social(raw: Request):
     user = require_user(raw)
-    art = db_ext.get_all_story_art()
-    wanted = {s.strip() for s in ids.split(",") if s.strip()}
-    if wanted:
-        art = {k: v for k, v in art.items() if k in wanted}
-    return art
+    return db_ext.get_all_story_social_counts()
 
 @router.get("/playthroughs")
 def list_playthroughs(raw: Request):
@@ -290,7 +288,7 @@ def get_map(playthrough_id: str, raw: Request):
 def get_inventory(playthrough_id: str, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
-    db_ext.dedupe_stackables(playthrough_id)  # self-healing: merge duplicate coins/materials
+    db_ext.dedupe_stackables(playthrough_id)
     db.ensure_playthrough_inventory(playthrough_id)
     items = db.list_playthrough_items(playthrough_id)
     equipment = db.list_playthrough_equipment(playthrough_id)
@@ -404,7 +402,6 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
     chars = db.get_story_characters(story_id)
-    # Merge cast portraits so the preview/edit UI can render them
     try:
         imgs = {c["id"]: (c.get("image") or "") for c in db_ext.get_cast_with_images(story_id)}
         for c in chars:
@@ -413,7 +410,6 @@ def get_story_detail(story_id: str, raw: Request):
         pass
     return {"story": story, "characters": chars}
 
-# utils/art.js cast endpoint
 @router.get("/stories/{story_id}/cast")
 def get_cast(story_id: str, raw: Request):
     user = require_user(raw)
@@ -421,6 +417,45 @@ def get_cast(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
     return db_ext.get_cast_with_images(story_id)
+
+# ── Social: likes & comments ──
+@router.get("/stories/{story_id}/social")
+def story_social(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.get_story_social(story_id, user["id"])
+
+@router.post("/stories/{story_id}/like")
+def like_story(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.toggle_story_like(story_id, user["id"])
+
+@router.post("/stories/{story_id}/comments")
+def post_comment(story_id: str, req: StoryCommentRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    content = req.content.strip()
+    if not content or len(content) > 500:
+        raise HTTPException(status_code=400, detail="Comment must be 1–500 characters")
+    row = db_ext.add_story_comment(story_id, user["id"], user["username"], content)
+    if not row: raise HTTPException(status_code=500, detail="Could not post comment. Try again.")
+    return {"id": row["id"], "created_at": str(row["created_at"]), "username": user["username"], "content": content, "user_id": user["id"]}
+
+@router.delete("/stories/{story_id}/comments/{comment_id}")
+def delete_comment(story_id: str, comment_id: int, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.delete_story_comment(comment_id, user["id"], story.get("creator_id")):
+        raise HTTPException(status_code=403, detail="You can only delete your own comments")
+    return {"status": "deleted"}
 
 @router.patch("/stories/{story_id}")
 def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
@@ -493,6 +528,17 @@ def update_character(story_id: str, char_id: str, req: CharacterUpdateRequest, r
     if fields and not db_ext.update_story_character(story_id, char_id, fields):
         raise HTTPException(status_code=404, detail="Character not found in this saga.")
     return {"status": "updated"}
+
+@router.delete("/stories/{story_id}")
+def delete_story(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can delete this saga")
+    if not db_ext.delete_story_full(story_id):
+        raise HTTPException(status_code=500, detail="Could not delete the saga. Try again.")
+    return {"status": "deleted"}
 
 @router.post("/stories/{story_id}/art")
 def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
@@ -602,6 +648,17 @@ def play_story(story_id: str, raw: Request):
     check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
+    try:
+        sm = story.get("metadata") or {}
+        starter = (sm.get("starter_location") or "").strip()
+        pt_meta = pt.get("metadata") or {}
+        if starter and not pt_meta.get("current_location"):
+            db.update_playthrough_location(pt["id"], starter)
+            db.upsert_playthrough_location(pt["id"], starter, f"The journey begins in {starter}.")
+            db_ext.ensure_world_node(pt["id"], starter, kind="settlement", description=f"The journey begins in {starter}.")
+            pt = db.get_playthrough(pt["id"]) or pt
+    except Exception as e:
+        logger.error(f"starter location seed failed: {e}")
     return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
 
 @router.post("/stories")
@@ -617,7 +674,6 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
         story_meta["starter_location"] = request.starterLocation.strip()[:120]
     if request.tone.strip():
         story_meta["tone"] = request.tone.strip()[:500]
-    # Level system readiness: explicit MaxHealth/MaxMana baseline caps (level 1)
     char_meta = {"stats": {"Health": 100, "MaxHealth": 100, "Mana": 50, "MaxMana": 50}, "inventory": ["Adventurer's Kit"]}
     telemetry = request.client_telemetry
     db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,

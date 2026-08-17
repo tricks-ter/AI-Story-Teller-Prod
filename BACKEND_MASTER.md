@@ -64,3 +64,16 @@ set_story_art · set_story_banner · get_all_story_art · set_character_image ·
 
 ## 11. MAINTENANCE RULES
 New route → §5 row + FRONTEND §6. New db method → §8/§9 + DATABASE §4. New tag → §7 + resolver/applier + assembler + FRONTEND §5. New column → DATABASE §3 + numbered migration.
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+New model: StoryCommentRequest{content}. App version 7.6.0.
+New routes (all require_user):
+| Route | Guard | db_ext call | Caller |
+|---|---|---|---|
+| GET /api/stories/social (BEFORE /stories/{id}) | U | get_all_story_social_counts | StoryLibrary |
+| GET /api/stories/{id}/social | U + check_story_access | get_story_social(story_id, user_id) → {liked, like_count, comments} | StoryDetails |
+| POST /api/stories/{id}/like | U + check_story_access | toggle_story_like (toggle insert/delete; one like per user/story) | StoryDetails |
+| POST /api/stories/{id}/comments | U + check_story_access | add_story_comment (content 1–500; stores username snapshot) | StoryDetails |
+| DELETE /api/stories/{id}/comments/{cid} | U | delete_story_comment (comment author OR story author incl. legacy-claim) | StoryDetails |
+| DELETE /api/stories/{id} | U + can_manage_story | delete_story_full (FK CASCADE wipes characters/messages/notes/playthroughs/likes/comments) | StoryDetails |
+Guards unchanged otherwise. SSE pipeline unchanged.

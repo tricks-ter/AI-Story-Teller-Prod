@@ -49,3 +49,15 @@ Boot GET /health + /auth/me · auth POST /auth/* · library GET /stories, /playt
 
 ## 8. MAINTENANCE RULES
 New component → §3 entry + §6 for its calls. New util → §4. New IndexedDB store → bump DB_VERSION + §4. Any backend call here must exist in BACKEND_MASTER §5 first.
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+- StoryDetails.jsx (v2): like button (toggle + count, pink when liked) via POST /api/stories/{id}/like; Reader Comments section (list newest-first, input+send, delete own comments) via GET/POST/DELETE .../social, .../comments; cast cards are now TAP-TO-EXPAND (full background on tap, "Read more ▾" hint); author-only DELETE button in header (double-tap confirm → DELETE /api/stories/{id} → back to library). Full premise + backgrounds + tone + starter-location chips remain.
+- StoryLibrary.jsx (v2): 5th parallel fetch GET /api/stories/social → {story_id: {likes, comments}}; cards show ♥ likes and 💬 comments counts when > 0.
+- App.jsx contract UNCHANGED (StoryDetails props: story, user, onBack, onStartJourney, onEdit).
+- UX rules kept: 44px targets, touch-manipulation, confirm-before-destructive (same pattern as end-journey flag).
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+- StoryDetails.jsx (v2): like button (toggle + count, pink when liked) via POST /api/stories/{id}/like; Reader Comments section (list newest-first, input+send, delete own comments) via GET/POST/DELETE .../social, .../comments; cast cards are now TAP-TO-EXPAND (full background on tap, "Read more ▾" hint); author-only DELETE button in header (double-tap confirm → DELETE /api/stories/{id} → back to library). Full premise + backgrounds + tone + starter-location chips remain.
+- StoryLibrary.jsx (v2): 5th parallel fetch GET /api/stories/social → {story_id: {likes, comments}}; cards show ♥ likes and 💬 comments counts when > 0.
+- App.jsx contract UNCHANGED (StoryDetails props: story, user, onBack, onStartJourney, onEdit).
+- UX rules kept: 44px targets, touch-manipulation, confirm-before-destructive (same pattern as end-journey flag).
