@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon } from 'lucide-react';
+import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon, MapPin, Feather } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, describeNetworkError } from '../utils/auth';
 
 export default function StoryDetails({ story, user, onBack, onStartJourney, onEdit }) {
@@ -32,6 +32,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
   const isPublic = full?.is_public ?? story.is_public ?? true;
   const cast = (full?.characters || []).slice(0, 6);
   const banner = full?.banner_image || full?.cover_image;
+  const meta = full?.metadata || {};
 
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">
@@ -68,12 +69,15 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
 
         <div className="px-4 sm:px-6 py-5 max-w-3xl mx-auto space-y-5">
           <div>
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
               <span className="text-[10px] font-bold uppercase tracking-wide text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">{full?.genre || story.genre}</span>
               {isPublic ? (
                 <span className="text-[10px] text-emerald-400 flex items-center gap-1"><Globe size={10} /> Public</span>
               ) : (
                 <span className="text-[10px] text-amber-400 flex items-center gap-1"><Lock size={10} /> Private</span>
+              )}
+              {(meta.starter_location) && (
+                <span className="text-[10px] text-blue-300 flex items-center gap-1"><MapPin size={10} /> {meta.starter_location}</span>
               )}
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold text-white leading-tight">{full?.title || story.title}</h1>
@@ -81,6 +85,9 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
               <p className="text-sm text-gray-400 mt-1">
                 by <span className="text-gray-200 font-medium">{full?.creator_name || story.creator_name}</span>
               </p>
+            )}
+            {meta.tone && (
+              <p className="text-xs text-gray-500 italic mt-2 flex items-center gap-1.5"><Feather size={11} /> {meta.tone}</p>
             )}
           </div>
 

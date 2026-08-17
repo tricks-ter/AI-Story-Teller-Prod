@@ -18,8 +18,7 @@ import { applyStateUpdateToCache, getCachedStoryContext, cacheInventory } from "
 import { syncQueue } from "./utils/syncQueue";
 
 // FE-BUG-1 FIX + LEVEL SYSTEM HOOK: centralized stat clamps.
-// Level 1 caps: Health 0..100, Mana 0..50. The level system will raise caps by
-// increasing MaxHealth/MaxMana — this clamp already follows those keys.
+// Level 1 caps: Health 0..100, Mana 0..50. Raising MaxHealth/MaxMana raises caps.
 function clampStat(stat, value, stats = {}) {
   const v = Number(value);
   if (Number.isNaN(v)) return value;
@@ -221,11 +220,7 @@ export default function App() {
 
   const handleUpdateStory = async (storyId, storyData) => {
     try {
-      const enriched = await withTelemetry({
-        title: storyData.title,
-        genre: storyData.genre,
-        premise: storyData.premise,
-      });
+      const enriched = await withTelemetry(storyData);
       const res = await fetch(`${BASE_URL}/stories/${storyId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -309,7 +304,7 @@ export default function App() {
               if (up.type === "LOCATION_UPDATE") {
                 newContext.current_location = up.location;
               } else if (up.type === "STAT_UPDATE") {
-                // FE-BUG-1 FIX: signed updates arrive as deltas — add to current value, then clamp.
+                // FE-BUG-1 FIX: signed updates are deltas — add to current, then clamp.
                 const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
                 if (charIdx !== -1) {
                   const c = newChars[charIdx];

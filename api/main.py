@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.4.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.5.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -80,14 +80,27 @@ class StoryCreateRequest(BaseModel):
     characterRole: str
     characterBackground: str
     isPublic: bool = True
+    coverImage: str = ""
+    bannerImage: str = ""
+    characterImage: str = ""
+    starterLocation: str = ""
+    tone: str = ""
     client_telemetry: Optional[dict] = None
 
 class StoryUpdateRequest(BaseModel):
     title: Optional[str] = None
     genre: Optional[str] = None
     premise: Optional[str] = None
-    cover_image: Optional[str] = None
-    banner_image: Optional[str] = None
+    coverImage: Optional[str] = None
+    bannerImage: Optional[str] = None
+    isPublic: Optional[bool] = None
+    starterLocation: Optional[str] = None
+    tone: Optional[str] = None
+    characterId: Optional[str] = None
+    characterName: Optional[str] = None
+    characterRole: Optional[str] = None
+    characterBackground: Optional[str] = None
+    characterImage: Optional[str] = None
 
 class AuthRequest(BaseModel):
     username: str
@@ -109,12 +122,17 @@ class VisibilityRequest(BaseModel):
 class ArtUpdateRequest(BaseModel):
     image: str = ""
     banner: str = ""
-    # A-3/B-1 compatibility: utils/art.js sends {kind, data_url}
+    # utils/art.js compatibility: {kind, data_url}
     kind: str = ""
     data_url: str = ""
 
 class CharArtRequest(BaseModel):
     data_url: str = ""
+
+class CharacterUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    background: Optional[str] = None
 
 router = APIRouter(prefix="/api")
 
@@ -177,6 +195,9 @@ def _recent_duplicate(last_row, content, window=90):
     except Exception:
         return False
 
+def _valid_data_url(s):
+    return isinstance(s, str) and s.startswith("data:image") and len(s) <= 900_000
+
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
@@ -235,7 +256,7 @@ def stories_art(raw: Request):
     user = require_user(raw)
     return db_ext.get_all_story_art()
 
-# A-3/B-1: filtered art map for utils/art.js (ids comma-separated; empty = all)
+# utils/art.js filtered art map
 @router.get("/art/stories")
 def art_stories(raw: Request, ids: str = ""):
     user = require_user(raw)
@@ -384,7 +405,7 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
     chars = db.get_story_characters(story_id)
-    # A-3/B-1: merge NPC portraits into the cast so StoryDetails can render them
+    # Merge NPC portraits so the detail/edit UI can show them
     try:
         imgs = {c["id"]: (c.get("image") or "") for c in db_ext.get_cast_with_images(story_id)}
         for c in chars:
@@ -393,7 +414,7 @@ def get_story_detail(story_id: str, raw: Request):
         pass
     return {"story": story, "characters": chars}
 
-# A-3/B-1: cast endpoint used by utils/art.js
+# utils/art.js cast endpoint
 @router.get("/stories/{story_id}/cast")
 def get_cast(story_id: str, raw: Request):
     user = require_user(raw)
@@ -420,17 +441,59 @@ def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
     if req.premise is not None:
         p = req.premise.strip()
         if p: fields["premise"] = p[:2000]
-    if req.cover_image is not None:
-        if len(req.cover_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
-        fields["cover_image"] = req.cover_image
-    if req.banner_image is not None:
-        if len(req.banner_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
-        fields["banner_image"] = req.banner_image
-    if not fields:
-        return {"status": "nothing_to_update"}
-    if not db_ext.update_story_fields(story_id, fields):
+    if req.coverImage is not None:
+        if req.coverImage and not _valid_data_url(req.coverImage): raise HTTPException(status_code=400, detail="Unsupported cover image.")
+        fields["cover_image"] = req.coverImage
+    if req.bannerImage is not None:
+        if req.bannerImage and not _valid_data_url(req.bannerImage): raise HTTPException(status_code=400, detail="Unsupported banner image.")
+        fields["banner_image"] = req.bannerImage
+    if fields and not db_ext.update_story_fields(story_id, fields):
         raise HTTPException(status_code=500, detail="Could not save changes. Try again.")
-    return {"status": "updated", "fields": list(fields.keys())}
+    if req.isPublic is not None:
+        db.set_story_visibility(story_id, req.isPublic)
+    meta_updates = {}
+    if req.starterLocation is not None:
+        meta_updates["starter_location"] = req.starterLocation.strip()[:120]
+    if req.tone is not None:
+        meta_updates["tone"] = req.tone.strip()[:500]
+    if meta_updates:
+        db_ext.set_story_metadata_keys(story_id, meta_updates)
+    if req.characterId:
+        cfields = {}
+        if req.characterName is not None:
+            cn = req.characterName.strip()
+            if not cn: raise HTTPException(status_code=400, detail="Character name can't be empty")
+            cfields["name"] = cn[:255]
+        if req.characterRole is not None:
+            cfields["role"] = req.characterRole.strip()[:100] or "Character"
+        if req.characterBackground is not None:
+            cfields["background"] = req.characterBackground.strip()[:2000]
+        if cfields and not db_ext.update_story_character(story_id, req.characterId, cfields):
+            raise HTTPException(status_code=404, detail="Character not found in this saga.")
+        if req.characterImage is not None:
+            if req.characterImage and not _valid_data_url(req.characterImage): raise HTTPException(status_code=400, detail="Unsupported portrait image.")
+            db_ext.set_character_image_by_id(story_id, req.characterId, req.characterImage)
+    return {"status": "updated"}
+
+@router.patch("/stories/{story_id}/characters/{char_id}")
+def update_character(story_id: str, char_id: str, req: CharacterUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+    fields = {}
+    if req.name is not None:
+        cn = req.name.strip()
+        if not cn: raise HTTPException(status_code=400, detail="Character name can't be empty")
+        fields["name"] = cn[:255]
+    if req.role is not None:
+        fields["role"] = req.role.strip()[:100] or "Character"
+    if req.background is not None:
+        fields["background"] = req.background.strip()[:2000]
+    if fields and not db_ext.update_story_character(story_id, char_id, fields):
+        raise HTTPException(status_code=404, detail="Character not found in this saga.")
+    return {"status": "updated"}
 
 @router.post("/stories/{story_id}/art")
 def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
@@ -441,7 +504,7 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
     banner = req.banner or ""
-    # A-3/B-1 compatibility: utils/art.js sends {kind, data_url}
+    # utils/art.js compatibility: {kind, data_url}
     if req.data_url and req.data_url.startswith("data:image"):
         if str(req.kind).lower() == "banner":
             banner = req.data_url
@@ -459,7 +522,7 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
     return {"status": "updated"}
 
-# A-3/B-1: NPC portrait upload used by utils/art.js
+# utils/art.js NPC portrait upload
 @router.post("/stories/{story_id}/characters/{char_id}/art")
 def set_character_art(story_id: str, char_id: str, req: CharArtRequest, raw: Request):
     user = require_user(raw)
@@ -542,6 +605,18 @@ def play_story(story_id: str, raw: Request):
     check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
+    # Seed the author's starter location into the world on first play
+    try:
+        sm = story.get("metadata") or {}
+        starter = (sm.get("starter_location") or "").strip()
+        pt_meta = pt.get("metadata") or {}
+        if starter and not pt_meta.get("current_location"):
+            db.update_playthrough_location(pt["id"], starter)
+            db.upsert_playthrough_location(pt["id"], starter, f"The journey begins in {starter}.")
+            db_ext.ensure_world_node(pt["id"], starter, kind="settlement", description=f"The journey begins in {starter}.")
+            pt = db.get_playthrough(pt["id"]) or pt
+    except Exception as e:
+        logger.error(f"starter location seed failed: {e}")
     return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
 
 @router.post("/stories")
@@ -553,6 +628,10 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
         "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
         "rules": "Keep responses immersive and descriptive."
     }
+    if request.starterLocation.strip():
+        story_meta["starter_location"] = request.starterLocation.strip()[:120]
+    if request.tone.strip():
+        story_meta["tone"] = request.tone.strip()[:500]
     # Level system readiness: explicit MaxHealth/MaxMana baseline caps (level 1)
     char_meta = {"stats": {"Health": 100, "MaxHealth": 100, "Mana": 50, "MaxMana": 50}, "inventory": ["Adventurer's Kit"]}
     telemetry = request.client_telemetry
@@ -560,6 +639,13 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
                     creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
                            request.characterBackground, metadata=char_meta, telemetry=telemetry)
+    # Comprehensive creation: images (all validated client-side + here)
+    if request.coverImage and _valid_data_url(request.coverImage):
+        db_ext.set_story_art(story_id, request.coverImage)
+    if request.bannerImage and _valid_data_url(request.bannerImage):
+        db_ext.set_story_banner(story_id, request.bannerImage)
+    if request.characterImage and _valid_data_url(request.characterImage):
+        db_ext.set_character_image_by_id(story_id, char_id, request.characterImage)
     intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
     db.add_story_message(story_id, "system", intro_msg, msg_type="intro", telemetry=telemetry)
     return {"story_id": story_id, "status": "created", "title": request.title}

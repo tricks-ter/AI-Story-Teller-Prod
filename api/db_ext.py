@@ -45,7 +45,7 @@ def set_character_image(story_id, character_name, image):
         (image or "", story_id, character_name), fetch="none", commit=True)
 
 def set_character_image_by_id(story_id, char_id, image):
-    """A-3/B-1: portrait upload by character id, scoped to the story. Returns False if not found."""
+    """Portrait upload by character id, scoped to the story. False if not found."""
     try:
         row = db.execute_query(
             "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
@@ -64,6 +64,47 @@ def get_cast_with_images(story_id):
     return db.execute_query(
         "SELECT id, name, role, background, is_player, image FROM story_characters WHERE story_id = %s "
         "ORDER BY is_player DESC, created_at ASC", (story_id,), fetch="all") or []
+
+def update_story_character(story_id, char_id, fields):
+    """Edit template character (name/role/background). Safe: playthroughs keep copies."""
+    try:
+        row = db.execute_query(
+            "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
+            (char_id, story_id), fetch="one")
+        if not row:
+            return False
+        allowed = {"name", "role", "background"}
+        sets, params = [], []
+        for k, v in (fields or {}).items():
+            if k in allowed and v is not None:
+                sets.append(f"{k} = %s"); params.append(str(v))
+        if not sets:
+            return True
+        params.append(char_id)
+        db.execute_query(f"UPDATE story_characters SET {', '.join(sets)} WHERE id = %s",
+                         tuple(params), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"update_story_character failed: {e}")
+        return False
+
+def set_story_metadata_keys(story_id, updates):
+    """Merge scalar keys (starter_location, tone, ...) into stories.metadata."""
+    try:
+        def fn(cur):
+            cur.execute("SELECT metadata FROM stories WHERE id = %s", (story_id,))
+            row = cur.fetchone()
+            if not row: return False
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            for k, v in (updates or {}).items():
+                meta[k] = v
+            cur.execute("UPDATE stories SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(meta), story_id))
+            return True
+        return db._with_conn(fn, commit=True) is True
+    except Exception as e:
+        logger.error(f"set_story_metadata_keys failed: {e}")
+        return False
 
 def can_manage_story(story, user_id):
     """Owner — or anyone may adopt a legacy (pre-auth) story."""
@@ -180,7 +221,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 (playthrough_id, node_name))
             row = cur.fetchone()
 
-            # Resolve optional parent (hierarchy: city -> building / npc)
             parent_id = None
             if updates.get("parent"):
                 pname = str(updates["parent"]).strip()
@@ -249,7 +289,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 params.append(row["id"])
                 cur.execute(f"UPDATE world_nodes SET {', '.join(sets)} WHERE id = %s", tuple(params))
 
-            # Fill description only when empty (first chronicle wins)
             if updates.get("description"):
                 cur.execute("SELECT metadata FROM world_nodes WHERE id = %s", (row["id"],))
                 mrow = cur.fetchone()

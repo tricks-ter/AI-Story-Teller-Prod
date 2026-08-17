@@ -59,7 +59,7 @@ Rarities: common, uncommon, rare, epic, legendary.
 - Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/knowledge -> ABILITY_UPDATE (never in backpack).
 - Health stays between 0 and MaxHealth (starts at 100); Mana stays between 0 and MaxMana (starts at 50). Never set them outside these bounds.
 - Damage, healing, and mana costs MUST use the delta form, e.g. [STAT_UPDATE: Hero.Health -10] or [STAT_UPDATE: Hero.Mana +5]. Use "= value" only for true absolute fixes.
-- ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise on your first response.
+- ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise or Starting Region on your first response.
 - Always include short desc= for new items, abilities and locations.
 - Respect remaining backpack capacity — do not grant loot that won't fit.
 
@@ -89,6 +89,11 @@ Time of Day: {pt['time_of_day']}
         meta = pt.get("metadata") or {}
         if meta.get("current_location"):
             world += f"Current Location: {meta['current_location']}\n"
+        story_meta = story.get("metadata") or {}
+        if story_meta.get("tone"):
+            world += f"Tone & Style Direction: {story_meta['tone']}\n"
+        if story_meta.get("starter_location") and not meta.get("current_location"):
+            world += f"Starting Region: {story_meta['starter_location']}\n"
 
         # PHASE 7: Procedural World Expansion Context
         loc_name = meta.get("current_location")
