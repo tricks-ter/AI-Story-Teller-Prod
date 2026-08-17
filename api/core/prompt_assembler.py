@@ -28,13 +28,13 @@ class PromptAssembler:
         all_items = state["items"]
         all_equipment = state["equipment"]
         all_backpacks = state["backpacks"]
-
+        
         # PHASE 6: Dynamic Context Fetching
         messages = db.get_recent_messages_for_context(self.playthrough_id, self.max_chars)
         memory = db.get_memory_summary(self.playthrough_id)
         lore = db.get_lorebook(self.playthrough_id)
         nudge = db.get_and_clear_nudge(self.playthrough_id)
-
+        
         notes = db.get_story_notes(story["id"], active_only=True)
 
         system = f"""[SYSTEM INSTRUCTIONS]
@@ -57,6 +57,8 @@ Rarities: common, uncommon, rare, epic, legendary.
 
 [STATE TAG RULES - CRITICAL]
 - Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/knowledge -> ABILITY_UPDATE (never in backpack).
+- Health stays between 0 and MaxHealth (starts at 100); Mana stays between 0 and MaxMana (starts at 50). Never set them outside these bounds.
+- Damage, healing, and mana costs MUST use the delta form, e.g. [STAT_UPDATE: Hero.Health -10] or [STAT_UPDATE: Hero.Mana +5]. Use "= value" only for true absolute fixes.
 - ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise on your first response.
 - Always include short desc= for new items, abilities and locations.
 - Respect remaining backpack capacity — do not grant loot that won't fit.
@@ -103,7 +105,7 @@ Time of Day: {pt['time_of_day']}
                     world += f"Economy: {node_meta['economy']}\n"
                 if node_meta.get("politics"):
                     world += f"Politics/Factions: {node_meta['politics']}\n"
-
+                
                 if children:
                     world += "Local Entities:\n"
                     for child in children:
@@ -148,7 +150,7 @@ Time of Day: {pt['time_of_day']}
             char_items = [i for i in all_items if i["character_id"] == c["id"]]
             char_equip_ids = {e["item_id"] for e in all_equipment if e["character_id"] == c["id"]}
             carried = [i for i in char_items if i["id"] not in char_equip_ids]
-
+            
             if carried:
                 world += "  Carried: " + ", ".join(
                     f"{i['name']} ×{i['quantity']}" if i["quantity"] > 1 else i["name"] for i in carried) + "\n"
@@ -170,7 +172,7 @@ Time of Day: {pt['time_of_day']}
         context = "\n[STORY MEMORY & RECENT EVENTS]\n"
         if memory:
             context += f"[PREVIOUS CHAPTERS SUMMARY]\n{memory}\n\n"
-
+            
         if lore:
             context += "[WORLD LOREBOOK]\n"
             for entry in lore[-15:]: # Keep last 15 entries in context
@@ -180,7 +182,7 @@ Time of Day: {pt['time_of_day']}
         for m in messages:
             role = "Player" if m["role"] == "user" else "Narrator"
             context += f"{role}: {m['content']}\n"
-
+            
         if nudge:
             context += f"\n{ nudge }\n"
 

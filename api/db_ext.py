@@ -44,9 +44,25 @@ def set_character_image(story_id, character_name, image):
         "UPDATE story_characters SET image = %s WHERE story_id = %s AND LOWER(name) = LOWER(%s)",
         (image or "", story_id, character_name), fetch="none", commit=True)
 
+def set_character_image_by_id(story_id, char_id, image):
+    """A-3/B-1: portrait upload by character id, scoped to the story. Returns False if not found."""
+    try:
+        row = db.execute_query(
+            "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
+            (char_id, story_id), fetch="one")
+        if not row:
+            return False
+        db.execute_query(
+            "UPDATE story_characters SET image = %s WHERE id = %s",
+            (image or "", char_id), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"set_character_image_by_id failed: {e}")
+        return False
+
 def get_cast_with_images(story_id):
     return db.execute_query(
-        "SELECT id, name, role, image FROM story_characters WHERE story_id = %s "
+        "SELECT id, name, role, background, is_player, image FROM story_characters WHERE story_id = %s "
         "ORDER BY is_player DESC, created_at ASC", (story_id,), fetch="all") or []
 
 def can_manage_story(story, user_id):

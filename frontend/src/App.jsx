@@ -17,13 +17,24 @@ import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPla
 import { applyStateUpdateToCache, getCachedStoryContext, cacheInventory } from "./utils/hudStore";
 import { syncQueue } from "./utils/syncQueue";
 
+// FE-BUG-1 FIX + LEVEL SYSTEM HOOK: centralized stat clamps.
+// Level 1 caps: Health 0..100, Mana 0..50. The level system will raise caps by
+// increasing MaxHealth/MaxMana — this clamp already follows those keys.
+function clampStat(stat, value, stats = {}) {
+  const v = Number(value);
+  if (Number.isNaN(v)) return value;
+  if (stat === "Health") return Math.max(0, Math.min(v, Number(stats.MaxHealth ?? 100)));
+  if (stat === "Mana") return Math.max(0, Math.min(v, Number(stats.MaxMana ?? 50)));
+  if (stat === "MaxHealth" || stat === "MaxMana") return Math.max(1, Math.min(v, 999));
+  return Math.max(0, Math.min(v, 999));
+}
+
 export default function App() {
   const [view, setView] = useState("landing");
   const [storyContext, setStoryContext] = useState(null);
   const [user, setUser] = useState(getSavedUser());
   const [pendingAction, setPendingAction] = useState(null);
   const [detailsStory, setDetailsStory] = useState(null);
-
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -180,7 +191,6 @@ export default function App() {
         syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'world' }, 'normal');
         syncQueue.enqueue('COMPRESS_MEMORY', { ptId: pt.id }, 'normal');
       }
-
     } catch (err) {
       console.error("[startJourney] error:", err);
       setStoryContext(null);
@@ -299,12 +309,16 @@ export default function App() {
               if (up.type === "LOCATION_UPDATE") {
                 newContext.current_location = up.location;
               } else if (up.type === "STAT_UPDATE") {
+                // FE-BUG-1 FIX: signed updates arrive as deltas — add to current value, then clamp.
                 const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
                 if (charIdx !== -1) {
                   const c = newChars[charIdx];
                   const meta = { ...(c.metadata || {}) };
                   const stats = { ...(meta.stats || {}) };
-                  stats[up.stat] = up.value;
+                  const fallback = up.stat === "Health" ? 100 : up.stat === "Mana" ? 50 : 0;
+                  const current = Number(stats[up.stat] ?? fallback);
+                  const next = up.is_delta ? current + Number(up.value) : Number(up.value);
+                  stats[up.stat] = clampStat(up.stat, next, stats);
                   meta.stats = stats;
                   newChars[charIdx] = { ...c, metadata: meta };
                 }

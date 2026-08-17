@@ -198,3 +198,14 @@ RULE: these files are append-only. Never remove entries or restructure them unle
 explicitly orders a refactor. When you add code, update the matching contract in the same commit.
 
 - 2026-08-13 Contracts sprint (verified vs commit f32ebcc): created three append-only master contracts — FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md. Discrepancy ledgers added: FE-BUG-1 (App.jsx STAT_UPDATE still assigns raw value → HUD -10/100; backend already fixed), FE-BUG-2 (SYNC_HUD key 'world' no-op), A-3/B-1 (utils/art.js targets endpoints that don't exist), B-2/D-1 (memory columns dormant vs metadata JSONB), B-4 (notes/visibility routes have no UI caller), B-6/D-2 (0008_story_indexes.sql missing from repo). All future sessions must read the three masters before coding and update them with every change.
+
+## 0.5 MASTER REFERENCE FILES (READ THESE TOO — mandatory)
+Before ANY task, read these three contracts in addition to this file:
+- FRONTEND_MASTER.md — every page/element, stat clamp system, and the exact backend call each action makes
+- BACKEND_MASTER.md — every route, its guard, db methods, tables, and frontend caller
+- DATABASE_MASTER.md — every table, the method→table matrix, migration ledger, and invariants
+RULE: these files are append-only. Never remove entries or restructure them unless the
+user explicitly orders a refactor. When you add code, update the matching contract(s) in
+the same commit. Discrepancy ledgers are historical truth — mark entries RESOLVED, never delete.
+
+- 2026-08-13 FE-BUG-1 + A-3/B-1 sprint: App.jsx applies STAT deltas additively + clampStat (Health 0..MaxHealth baseline 100, Mana 0..MaxMana baseline 50 — level-system ready); state_applier._stat_cap enforces the same caps server-side; new characters seeded with MaxHealth=100/MaxMana=50; prompt teaches caps + delta-only damage. A-3/B-1 resolved: implemented GET /api/art/stories?ids=, GET /api/stories/{id}/cast, POST /api/stories/{id}/characters/{cid}/art, extended ArtUpdateRequest to accept {kind,data_url}; GET /api/stories/{id} now merges cast portraits; db_ext gains set_character_image_by_id. Created FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md (append-only contracts) + this §0.5 pointer.

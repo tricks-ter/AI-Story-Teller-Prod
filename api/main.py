@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.3.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.4.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -109,6 +109,12 @@ class VisibilityRequest(BaseModel):
 class ArtUpdateRequest(BaseModel):
     image: str = ""
     banner: str = ""
+    # A-3/B-1 compatibility: utils/art.js sends {kind, data_url}
+    kind: str = ""
+    data_url: str = ""
+
+class CharArtRequest(BaseModel):
+    data_url: str = ""
 
 router = APIRouter(prefix="/api")
 
@@ -228,6 +234,16 @@ def list_stories(raw: Request, scope: str = "all"):
 def stories_art(raw: Request):
     user = require_user(raw)
     return db_ext.get_all_story_art()
+
+# A-3/B-1: filtered art map for utils/art.js (ids comma-separated; empty = all)
+@router.get("/art/stories")
+def art_stories(raw: Request, ids: str = ""):
+    user = require_user(raw)
+    art = db_ext.get_all_story_art()
+    wanted = {s.strip() for s in ids.split(",") if s.strip()}
+    if wanted:
+        art = {k: v for k, v in art.items() if k in wanted}
+    return art
 
 @router.get("/playthroughs")
 def list_playthroughs(raw: Request):
@@ -367,7 +383,24 @@ def get_story_detail(story_id: str, raw: Request):
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
-    return {"story": story, "characters": db.get_story_characters(story_id)}
+    chars = db.get_story_characters(story_id)
+    # A-3/B-1: merge NPC portraits into the cast so StoryDetails can render them
+    try:
+        imgs = {c["id"]: (c.get("image") or "") for c in db_ext.get_cast_with_images(story_id)}
+        for c in chars:
+            c["image"] = imgs.get(c["id"], "")
+    except Exception:
+        pass
+    return {"story": story, "characters": chars}
+
+# A-3/B-1: cast endpoint used by utils/art.js
+@router.get("/stories/{story_id}/cast")
+def get_cast(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.get_cast_with_images(story_id)
 
 @router.patch("/stories/{story_id}")
 def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
@@ -408,6 +441,12 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
     banner = req.banner or ""
+    # A-3/B-1 compatibility: utils/art.js sends {kind, data_url}
+    if req.data_url and req.data_url.startswith("data:image"):
+        if str(req.kind).lower() == "banner":
+            banner = req.data_url
+        else:
+            image = req.data_url
     if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
@@ -418,6 +457,23 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=500, detail="Could not save the picture. Try again.")
     if banner and not db_ext.set_story_banner(story_id, banner):
         raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
+    return {"status": "updated"}
+
+# A-3/B-1: NPC portrait upload used by utils/art.js
+@router.post("/stories/{story_id}/characters/{char_id}/art")
+def set_character_art(story_id: str, char_id: str, req: CharArtRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+    data_url = req.data_url or ""
+    if data_url and not data_url.startswith("data:image"):
+        raise HTTPException(status_code=400, detail="Unsupported image format.")
+    if len(data_url) > 900_000:
+        raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
+    if not db_ext.set_character_image_by_id(story_id, char_id, data_url):
+        raise HTTPException(status_code=404, detail="Character not found in this saga.")
     return {"status": "updated"}
 
 @router.get("/stories/{story_id}/messages")
@@ -497,7 +553,8 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
         "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
         "rules": "Keep responses immersive and descriptive."
     }
-    char_meta = {"stats": {"Health": 100, "Mana": 50}, "inventory": ["Adventurer's Kit"]}
+    # Level system readiness: explicit MaxHealth/MaxMana baseline caps (level 1)
+    char_meta = {"stats": {"Health": 100, "MaxHealth": 100, "Mana": 50, "MaxMana": 50}, "inventory": ["Adventurer's Kit"]}
     telemetry = request.client_telemetry
     db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,
                     creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)

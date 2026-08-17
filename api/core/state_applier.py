@@ -15,6 +15,16 @@ logger = logging.getLogger(__name__)
 
 STACKABLE_TYPES = {"consumable", "material"}
 
+def _stat_cap(stat_name, current_stats):
+    """Level-ready caps: Health follows MaxHealth (baseline 100), Mana follows
+    MaxMana (baseline 50). The future level system raises MaxHealth/MaxMana and
+    these caps follow automatically."""
+    if stat_name == "Health":
+        return float(current_stats.get("MaxHealth", 100) or 100)
+    if stat_name == "Mana":
+        return float(current_stats.get("MaxMana", 50) or 50)
+    return 999.0
+
 def apply_state_updates(playthrough_id: str, updates: list) -> dict:
     applied = []
     rejected = []
@@ -29,18 +39,20 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                 char_name = update["character"]
                 stat_name = update["stat"]
                 new_value = update["value"]
+                # Load current stats once: needed for deltas AND for level-ready caps.
+                current_stats = {}
+                chars = db.get_playthrough_characters(playthrough_id)
+                for c in chars:
+                    if c["character_name"].lower() == char_name.lower():
+                        current_stats = (c.get("metadata") or {}).get("stats", {}) or {}
+                        break
                 # CRITICAL: Always treat as delta if is_delta is True
                 if update.get("is_delta", False):
-                    chars = db.get_playthrough_characters(playthrough_id)
-                    current = None
-                    for c in chars:
-                        if c["character_name"].lower() == char_name.lower():
-                            meta = c.get("metadata") or {}
-                            current = (meta.get("stats", {})).get(stat_name, 100)
-                            break
-                    if current is not None:
-                        new_value = float(current) + float(new_value)
-                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=999):
+                    fallback = 100 if stat_name == "Health" else 50 if stat_name == "Mana" else 0
+                    current = current_stats.get(stat_name, fallback)
+                    new_value = float(current) + float(new_value)
+                cap = _stat_cap(stat_name, current_stats)
+                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=cap):
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
