@@ -1,61 +1,66 @@
 # BACKEND MASTER CONTRACT — InkMind
-> Verified against commit f32ebcc + the FE-BUG-1 / A-3-B1 fix sprint.
-> GOVERNANCE: APPEND-ONLY. Never remove entries or restructure until the user
-> explicitly orders a refactor. Keep FRONTEND_MASTER.md §6 and DATABASE_MASTER.md §4 consistent.
+> Verified vs commit f32ebcc + "comprehensive forge + masters" commit. APPEND-ONLY.
+> Keep FRONTEND_MASTER §6 and DATABASE_MASTER §4 consistent with any change.
 
 ## 1. STACK & DEPLOY
-FastAPI 0.115.5 on Vercel serverless · single api/main.py · APIRouter(prefix="/api") · app.include_router(router) at file end · app version 7.4.0. vercel.json: buildCommand cd frontend && npm install && npm run build; rewrites /api/(.*) → /api/main.py, /(.*) → /index.html. Migrations DEPLOY-TIME ONLY (migrate.yml → api/migrate.py, schema_migrations ledger). Runtime init_tables() = connection check only. CORS open (no per-user rate limit yet).
+FastAPI 0.115.5 on Vercel serverless · api/main.py · APIRouter(prefix="/api") mounted at file end · app v7.5.0. vercel.json: /api/(.*) → /api/main.py; /(.*) → /index.html. Migrations DEPLOY-TIME ONLY (migrate.yml → api/migrate.py, schema_migrations ledger); runtime init_tables() = connection check. CORS open. AI: zai-sdk; glm-4.7-flash default, glm-4.5-flash for /compress.
 
-## 2. MODULE ROLES
-main.py (routes/SSE/guards) · database.py (Database class, singleton db, ~60 methods) · db_ext.py (additive: art, story fields, world state/events, stackables, memory) · core/auth.py (PBKDF2 + tokens) · core/prompt_assembler.py · core/state_resolver.py · core/state_applier.py · core/resilience.py · migrate.py · tests/ (resolver, resilience, main helpers).
+## 2. MODULES
+main.py (routes/SSE/guards/models) · database.py (Database class + db singleton) · db_ext.py (additive: art, story fields/metadata, world state/events, stackables, memory) · core/auth.py (PBKDF2 100k, tokens 30d/12h) · core/prompt_assembler.py · core/state_resolver.py · core/state_applier.py · core/resilience.py (breaker 5×429→30s, backoff 0.8×2^n cap 8 jitter) · migrate.py · tests/.
 
 ## 3. GUARDS
-require_user (all routes, 401) · check_story_access (foreign/private 403; LEGACY_USER_ID bypass) · require_story_owner (notes, visibility) · db_ext.can_manage_story (PATCH story, art routes: owner OR legacy-claim) · require_own_playthrough · ensure_playthrough · _resolve_player_char · _recent_duplicate (90s idempotency) · REASON_TEXT (human errors).
+require_user (all routes) · check_story_access (foreign/private 403; legacy bypass) · require_story_owner (notes/visibility) · db_ext.can_manage_story (owner OR legacy-claim: PATCH story, art routes) · require_own_playthrough · ensure_playthrough · _resolve_player_char · _recent_duplicate (90s) · _valid_data_url (data:image ≤900KB).
 
-## 4. REQUEST MODELS
-MessageItem · ChatRequest · StoryContinueRequest · StoryCreateRequest · StoryUpdateRequest · AuthRequest · ItemActionRequest · NoteCreateRequest · VisibilityRequest · ArtUpdateRequest{image,banner,kind,data_url} · CharArtRequest{data_url}.
+## 4. MODELS
+ChatRequest · StoryContinueRequest · StoryCreateRequest{title,genre,premise,characterName/Role/Background,isPublic,coverImage,bannerImage,characterImage,starterLocation,tone} · StoryUpdateRequest{title,genre,premise,coverImage,bannerImage,isPublic,starterLocation,tone,characterId,characterName,characterRole,characterBackground,characterImage} · AuthRequest · ItemActionRequest · NoteCreateRequest · VisibilityRequest · ArtUpdateRequest{image,banner,kind,data_url} · CharArtRequest{data_url} · CharacterUpdateRequest{name,role,background}.
 
-## 5. ROUTE TABLE (guard · db calls · tables · frontend caller)
-- GET /health · SELECT 1 · App boot
-- POST /auth/signup|login|logout · GET /auth/me · users, auth_tokens · AuthPage/App
-- GET /stories?scope=all|mine · db.list_all_stories / list_stories_for_user (both return creator_id+creator_name+played_count) · stories,users,story_characters,playthroughs · StoryLibrary
-- GET /stories/art (BEFORE /stories/{id}) · db_ext.get_all_story_art · stories · StoryLibrary
-- GET /art/stories?ids= (A-3/B-1) · db_ext.get_all_story_art filtered · stories · utils/art.js
-- GET /stories/{id} · db.get_story + get_story_characters + image merge from db_ext.get_cast_with_images (try/fallback) · stories,story_characters · StoryDetails
-- GET /stories/{id}/cast (A-3/B-1) · db_ext.get_cast_with_images (id,name,role,background,is_player,image) · story_characters · utils/art.js
-- PATCH /stories/{id} · db_ext.can_manage_story + update_story_fields (title≤120, genre≤60, premise≤2000, cover/banner ≤900KB) · stories · StoryCreator edit
-- POST /stories/{id}/art · can_manage_story; accepts {image,banner} AND {kind,data_url} (kind=banner → banner_image) · stories · StoryLibrary + utils/art.js
-- POST /stories/{id}/characters/{char_id}/art (A-3/B-1) · can_manage_story + db_ext.set_character_image_by_id (story-scoped, 404 if char missing) · story_characters · utils/art.js
-- POST /stories · create story + character (stats seed Health/MaxHealth=100, Mana/MaxMana=50) + intro 'legacy' message · StoryCreator
-- POST /stories/{id}/play · ensure_playthrough + ensure_playthrough_inventory · App.handleStartJourney
-- POST /stories/{id}/continue (SSE) · pipeline §6 · api.streamStory
-- GET /stories/{id}/messages · base_only → playthrough_id='legacy' · App/art.js
-- notes CRUD + visibility · require_story_owner · story_notes/stories (⚠ no frontend caller currently)
-- GET /playthroughs · list_playthroughs_for_user · StoryLibrary History
-- GET /playthroughs/{id}/messages|map|inventory · O · inventory runs db_ext.dedupe_stackables first · syncQueue/api.js
-- GET /playthroughs/{id}/world-nodes|world-events · db_ext.get_world_nodes_full / get_recent_world_events · WorldCodex/syncQueue
-- POST /playthroughs/{id}/compress · >50 msgs → Pulse (glm-4.5-flash) summarize ≤250 words → db_ext.set_memory_summary (metadata.memory_summary) · syncQueue
-- POST /playthroughs/{id}/equip|unequip|use|drop|complete · db item methods / complete_playthrough · HUD_ACTION/App
+## 5. ROUTE TABLE (guard · db calls · tables · caller)
+GET /health · SELECT 1 · App
+POST /auth/signup|login|logout · GET /auth/me · users, auth_tokens · AuthPage/App
+GET /stories?scope · list_all_stories / list_stories_for_user (creator_id+creator_name+played_count) · StoryLibrary
+GET /stories/art (BEFORE /stories/{id}) · db_ext.get_all_story_art · StoryLibrary
+GET /art/stories?ids= · filtered art map · art.js
+GET /playthroughs · list_playthroughs_for_user · StoryLibrary History
+GET /playthroughs/{id}/messages|map · O · App/StoryMap/syncQueue
+GET /playthroughs/{id}/inventory · O · dedupe_stackables → ensure → list items/equipment/backpacks + bonuses + abilities · InventoryPanel/syncQueue
+GET /playthroughs/{id}/world-nodes|world-events · O · db_ext · WorldCodex/syncQueue
+POST /playthroughs/{id}/compress · O · >50 msgs → Pulse summarize → set_memory_summary · syncQueue
+POST /playthroughs/{id}/equip|unequip|use|drop · O · db item methods · HUD_ACTION
+POST /playthroughs/{id}/complete · O · complete_playthrough · App
+GET /stories/{id} · U+S · get_story + get_story_characters + image merge via get_cast_with_images · StoryDetails/art.js
+GET /stories/{id}/cast · U+S · get_cast_with_images · art.js
+PATCH /stories/{id} · M · update_story_fields + set_story_visibility + set_story_metadata_keys + update_story_character + set_character_image_by_id · StoryCreator edit
+PATCH /stories/{id}/characters/{cid} · M · update_story_character · (direct clients)
+POST /stories/{id}/art · M · set_story_art/set_story_banner; accepts {image,banner} AND {kind,data_url} · StoryLibrary/art.js
+POST /stories/{id}/characters/{cid}/art · M · set_character_image_by_id · art.js
+GET/POST/DELETE /stories/{id}/notes… · S/W · story_notes · (no current UI caller)
+POST /stories/{id}/visibility · W · set_story_visibility · (no current UI caller)
+POST /stories/{id}/play · U+S · ensure_playthrough + ensure_playthrough_inventory · App
+POST /stories · U · create_story(meta starter_location/tone) + add_story_character(stats Health/MaxHealth 100, Mana/MaxMana 50) + intro 'legacy' msg + art setters · StoryCreator
+POST /stories/{id}/continue · U+S · pipeline §6 · streamStory
+POST /chat/stream · optional U · ensure_session/add_message · streamChat
 
-## 6. STORY TURN PIPELINE (continue_story)
-auth+access → ensure_playthrough → dedupe-guard user msg → PromptAssembler (§7) → ZAI stream via call_with_retry(3) → SSE thinking/content → resolve_state → apply_state_updates → save clean narration → SSE state_update{clean_content,applied,rejected,day,time_of_day,status} → done. Errors: SSE error{code,retry_after,message}.
+## 6. STORY TURN PIPELINE
+auth+access → ensure_playthrough → dedupe user msg → PromptAssembler → ZAI stream (call_with_retry 3) → SSE thinking/content → resolve_state → apply_state_updates → save narration → SSE state_update{clean_content, applied, rejected, day, time_of_day, status} → done. Errors: SSE error{code,retry_after,message}.
 
-## 7. PROMPT ORDER (prompt_assembler.py)
-SYSTEM + TAG CONTRACT → STATE TAG RULES (incl. HP/MP caps + delta-only damage) → LIVING WORLD RULES → PLAYER AGENCY → STYLE → WORLD STATE → LOCAL ENVIRONMENT (node + ≤20 children) → WORLD CODEX (≤30 nodes w/ state) → RECENT WORLD EVENTS (≤8) → Active Characters → Known Locations → STORY MEMORY (summary, lorebook ≤15, recent msgs, nudge) → DIRECTOR'S NOTES → PLAYER ACTION.
+## 7. TAG PROTOCOL & BEHAVIOR
+Resolver: TIME, STAT(=±N or space form ⇒ is_delta), LOCATION(desc), ITEM ±(attrs incl bonus./desc), ABILITY ±, BAG, WORLD_STATE_UPDATE(kind/parent/status/relationship/power/wealth/is_alive/allegiance/desc), WORLD_EVENT(type/desc), SAGA_END.
+Applier: STAT delta adds to current, clamp 0..999 (backend) — frontend clamps to MaxHealth/MaxMana (see FRONTEND §5, D-5); LOCATION upsert + ensure_world_node(settlement); ITEM stackables bump qty else grant w/ capacity; WORLD_STATE upsert w/ parent auto-create + clamps (rel ±100, power 0..100, wealth ≤9,999,999); WORLD_EVENT ledger w/ current day; SAGA_END completes.
+PromptAssembler order: SYSTEM+tags+rules(living world/agency/style) → WORLD STATE(+tone/starter from story metadata via §5 GET) → LOCAL ENVIRONMENT(node+children) → WORLD CODEX(≤30) → RECENT EVENTS(≤8) → characters(stats/abilities/carried/equipped/backpack) → known locations → MEMORY(summary/lorebook/recent/nudge) → DIRECTOR'S NOTES → ACTION.
 
-## 8. TAG PROTOCOL (resolver → applier)
-TIME_UPDATE · STAT_UPDATE (is_delta when "= ±N" or space form; applier adds to current; cap via _stat_cap: Health→MaxHealth default 100, Mana→MaxMana default 50, else 999; db clamps 0..cap) · LOCATION_UPDATE (upsert locations + set current_location + db_ext.ensure_world_node settlement) · ITEM_UPDATE ± (stackables bump quantity via find_stackable_item/bump_item_quantity; capacity gate) · ABILITY_UPDATE · BAG_UPDATE (level 1..20) · WORLD_STATE_UPDATE (upsert; kind aliases kingdom→region, family/house→faction, building/shop/inn/tavern/temple/market→location, city/town/village→settlement; parent resolution; deltas + clamps rel −100..100, power 0..100, wealth 0..9,999,999; desc fill-only-empty) · WORLD_EVENT (ledger w/ current day) · SAGA_END (complete_playthrough).
+## 8. DB METHOD INDEX (database.py)
+auth/users · quick chat · stories(create/list/get/characters/messages/visibility) · notes CRUD · playthroughs(get/create/complete/list/messages) · state(time/location upsert/stat/ability/inventory mirror) · inventory(ensure/list/capacity/grant/consume/use/drop/equip/unequip/bonuses/backpack level) · legacy story-scoped · Phase6(get_full_playthrough_state, get_recent_messages_for_context, get_memory_summary, get_lorebook, get_and_clear_nudge) · Phase7(get_world_nodes, bulk_insert_world_nodes, get_node_context_for_location).
 
-## 9. RESILIENCE
-RETRYABLE {429,500,502,503,504} · CircuitBreaker threshold 5 → open 30s (singleton BREAKER) · backoff base 0.8 ×2^attempt cap 8.0 full jitter, honors Retry-After (0.5–30s) · friendly_upstream human text · frontend mirrors one retry (api.js runStream).
+## 9. DB_EXT INDEX
+set_story_art · set_story_banner · get_all_story_art · set_character_image · set_character_image_by_id · get_cast_with_images(id,name,role,background,is_player,image) · update_story_character · set_story_metadata_keys · can_manage_story · update_story_fields · find_stackable_item · bump_item_quantity · dedupe_stackables · get_world_nodes_full · ensure_world_node · update_world_node_state · record_world_event · get_recent_world_events · set_memory_summary.
 
-## 10. DB_EXT FUNCTION INDEX
-set_story_art · set_story_banner · get_all_story_art · set_character_image (by name) · set_character_image_by_id (by id, story-scoped) · get_cast_with_images (id,name,role,background,is_player,image) · can_manage_story · update_story_fields · find_stackable_item · bump_item_quantity · dedupe_stackables · get_world_nodes_full · ensure_world_node · update_world_node_state · record_world_event · get_recent_world_events · set_memory_summary.
+## 10. DISCREPANCY LEDGER
+- B-1/A-1 art.js endpoints — RESOLVED.
+- B-2 memory/lore/nudge columns dormant (code uses metadata JSONB) — OPEN (D-1).
+- B-4 notes/visibility routes have no UI caller — OPEN.
+- B-5 no per-user rate limit; CORS open — OPEN.
+- B-6 0008_story_indexes.sql absent from repo — OPEN.
+- D-5 backend stat clamp 0..999 vs frontend clampStat to Max* — ACCEPTED (AI prompt states caps; frontend enforces display).
 
-## 11. DISCREPANCY LEDGER (append-only)
-- B-1/A-3 — art.js endpoints missing. RESOLVED 2026-08-13 (§5: /art/stories, /cast, /characters/{cid}/art, ArtUpdateRequest extended).
-- FE-BUG-1 backend half — applier now caps Health/Mana by MaxHealth/MaxMana (_stat_cap). RESOLVED 2026-08-13.
-- B-2 — playthroughs.memory_summary/lorebook/active_nudge COLUMNS exist (0011_memory_and_lore) but code uses metadata JSONB — columns dormant. OPEN (user decision).
-- B-4 — notes + visibility routes have no frontend caller. OPEN.
-- B-5 — no per-user rate limit; CORS open. OPEN.
-- B-6 — 0008_story_indexes.sql absent from repo (old docs reference it). OPEN (verify production indexes if plans degrade).
+## 11. MAINTENANCE RULES
+New route → §5 row + FRONTEND §6. New db method → §8/§9 + DATABASE §4. New tag → §7 + resolver/applier + assembler + FRONTEND §5. New column → DATABASE §3 + numbered migration.

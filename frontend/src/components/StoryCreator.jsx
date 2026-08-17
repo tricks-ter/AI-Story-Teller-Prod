@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Wand2, ImageIcon, Globe, Lock, X } from 'lucide-react';
+import { ArrowLeft, Wand2, Globe, Lock, X, ImageIcon } from 'lucide-react';
 import { fileToDataUrl } from '../utils/art';
 
 const GENRES = ['Fantasy', 'Sci-Fi', 'Cyberpunk', 'Lovecraftian Horror', 'Modern Slice of Life', 'Mystery', 'Post-Apocalyptic', 'Historical', 'Wuxia'];
@@ -8,12 +8,7 @@ function ImageField({ label, value, onChange, hint }) {
   const ref = useRef(null);
   const pick = async (file) => {
     if (!file) return;
-    try {
-      const url = await fileToDataUrl(file);
-      onChange(url);
-    } catch (e) {
-      console.warn('[art]', e);
-    }
+    try { onChange(await fileToDataUrl(file)); } catch (e) { console.warn('[art]', e); }
   };
   return (
     <div>
@@ -23,13 +18,9 @@ function ImageField({ label, value, onChange, hint }) {
           {value ? <img src={value} alt={label} className="w-full h-full object-cover" /> : <ImageIcon size={16} className="text-gray-600" />}
         </div>
         <div className="flex gap-2">
-          <button type="button" onClick={() => ref.current?.click()} className="px-3 min-h-[44px] rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium touch-manipulation active:scale-95">
-            Choose
-          </button>
+          <button type="button" onClick={() => ref.current?.click()} className="px-3 min-h-[44px] rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium touch-manipulation active:scale-95">Choose</button>
           {value && (
-            <button type="button" onClick={() => onChange('')} className="px-3 min-h-[44px] rounded-lg bg-gray-800 hover:bg-red-600/40 text-gray-300 text-xs touch-manipulation active:scale-95">
-              <X size={13} />
-            </button>
+            <button type="button" onClick={() => onChange('')} className="px-3 min-h-[44px] rounded-lg bg-gray-800 hover:bg-red-600/40 text-gray-300 text-xs touch-manipulation active:scale-95"><X size={13} /></button>
           )}
         </div>
       </div>
@@ -56,12 +47,12 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
       title: initialData.title || '',
       genre: initialData.genre || 'Fantasy',
       premise: initialData.premise || '',
-      starterLocation: initialData.metadata?.starter_location || initialData.starterLocation || '',
-      tone: initialData.metadata?.tone || initialData.tone || '',
-      isPublic: initialData.is_public ?? initialData.isPublic ?? true,
-      coverImage: initialData.cover_image || initialData.coverImage || '',
-      bannerImage: initialData.banner_image || initialData.bannerImage || '',
-      characterName: pc?.name || pc?.character_name || '',
+      starterLocation: initialData.metadata?.starter_location || '',
+      tone: initialData.metadata?.tone || '',
+      isPublic: initialData.is_public ?? true,
+      coverImage: initialData.cover_image || '',
+      bannerImage: initialData.banner_image || '',
+      characterName: pc?.name || '',
       characterRole: pc?.role || 'Protagonist',
       characterBackground: pc?.background || '',
       characterImage: pc?.image || '',
@@ -70,19 +61,13 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
   }, [initialData]);
 
   const set = (k, v) => setData(d => ({ ...d, [k]: v }));
-  const handleNext = () => setStep(s => s + 1);
-  const handleBackStep = () => setStep(s => s - 1);
+  const inputCls = "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none";
 
   const handleFinish = () => {
     setBusy(true);
-    if (isEditing && onUpdate && initialData) {
-      onUpdate(initialData.id, data);
-    } else {
-      onStart(data);
-    }
+    if (isEditing && onUpdate && initialData) onUpdate(initialData.id, data);
+    else onStart(data);
   };
-
-  const inputCls = "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none";
 
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col items-center p-4">
@@ -120,7 +105,6 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">Tone & Style Direction <span className="text-gray-600">(optional)</span></label>
               <textarea placeholder="e.g., Gritty and political; keep magic rare and costly." rows="2" className={`${inputCls} resize-none`} value={data.tone} onChange={e => set('tone', e.target.value)} />
-              <p className="text-[11px] text-gray-600 mt-1">The narrator follows this direction on every turn.</p>
             </div>
             <div className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-xl px-4 py-3">
               <span className="flex items-center gap-2 text-sm text-gray-300">
@@ -133,7 +117,7 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
             </div>
             <ImageField label="Cover Image" value={data.coverImage} onChange={v => set('coverImage', v)} hint="Shown on library cards." />
             <ImageField label="Banner Image" value={data.bannerImage} onChange={v => set('bannerImage', v)} hint="Shown on the story page header." />
-            <button onClick={handleNext} disabled={!data.title} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation active:scale-95">
+            <button onClick={() => setStep(2)} disabled={!data.title} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation active:scale-95">
               Next: Protagonist
             </button>
           </div>
@@ -160,8 +144,8 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
             </div>
             <ImageField label="Portrait" value={data.characterImage} onChange={v => set('characterImage', v)} hint="Shown on the story page cast list." />
             <div className="flex gap-3 pt-2">
-              <button onClick={handleBackStep} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">Back</button>
-              <button onClick={handleNext} disabled={!data.characterName} className="flex-[2] bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg disabled:opacity-50 touch-manipulation active:scale-95">Next: Review</button>
+              <button onClick={() => setStep(1)} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">Back</button>
+              <button onClick={() => setStep(3)} disabled={!data.characterName} className="flex-[2] bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg disabled:opacity-50 touch-manipulation active:scale-95">Next: Review</button>
             </div>
           </div>
         )}
@@ -190,7 +174,7 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
               </div>
             </div>
             <div className="flex gap-3 pt-2">
-              <button onClick={handleBackStep} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">Back</button>
+              <button onClick={() => setStep(2)} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">Back</button>
               <button onClick={handleFinish} disabled={busy} className="flex-[2] bg-gradient-to-r from-purple-600 to-blue-600 hover:opacity-90 text-white font-bold py-3.5 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50 touch-manipulation active:scale-95">
                 <Wand2 className="w-4 h-4 md:w-5 md:h-5" /> {busy ? 'Saving…' : isEditing ? 'Save Changes' : 'Begin Adventure'}
               </button>

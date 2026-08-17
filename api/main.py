@@ -122,6 +122,8 @@ class VisibilityRequest(BaseModel):
 class ArtUpdateRequest(BaseModel):
     image: str = ""
     banner: str = ""
+    kind: str = ""
+    data_url: str = ""
 
 class CharArtRequest(BaseModel):
     data_url: str = ""
@@ -402,7 +404,7 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
     chars = db.get_story_characters(story_id)
-    # Merge cast portraits so the detail/edit UI can render them
+    # Merge cast portraits so the preview/edit UI can render them
     try:
         imgs = {c["id"]: (c.get("image") or "") for c in db_ext.get_cast_with_images(story_id)}
         for c in chars:
@@ -501,6 +503,11 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
     banner = req.banner or ""
+    if req.data_url and req.data_url.startswith("data:image"):
+        if str(req.kind).lower() == "banner":
+            banner = req.data_url
+        else:
+            image = req.data_url
     if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
@@ -513,7 +520,6 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
     return {"status": "updated"}
 
-# utils/art.js NPC portrait upload
 @router.post("/stories/{story_id}/characters/{char_id}/art")
 def set_character_art(story_id: str, char_id: str, req: CharArtRequest, raw: Request):
     user = require_user(raw)
@@ -596,18 +602,6 @@ def play_story(story_id: str, raw: Request):
     check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
-    # Seed the author's starter location into the world on first play
-    try:
-        sm = story.get("metadata") or {}
-        starter = (sm.get("starter_location") or "").strip()
-        pt_meta = pt.get("metadata") or {}
-        if starter and not pt_meta.get("current_location"):
-            db.update_playthrough_location(pt["id"], starter)
-            db.upsert_playthrough_location(pt["id"], starter, f"The journey begins in {starter}.")
-            db_ext.ensure_world_node(pt["id"], starter, kind="settlement", description=f"The journey begins in {starter}.")
-            pt = db.get_playthrough(pt["id"]) or pt
-    except Exception as e:
-        logger.error(f"starter location seed failed: {e}")
     return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
 
 @router.post("/stories")

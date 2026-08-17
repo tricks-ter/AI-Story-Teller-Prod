@@ -220,7 +220,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 "WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
                 (playthrough_id, node_name))
             row = cur.fetchone()
-
             parent_id = None
             if updates.get("parent"):
                 pname = str(updates["parent"]).strip()
@@ -238,7 +237,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                         "VALUES (%s, %s, NULL, 'settlement', %s, '{}', 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                         (pid, playthrough_id, pname))
                     parent_id = pid
-
             created = False
             if not row:
                 kind = str(updates.get("kind", "")).lower()
@@ -257,7 +255,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                     (new_id, playthrough_id, parent_id, kind, node_name, json.dumps(meta)))
                 row = {"id": new_id, "parent_id": parent_id, "relationship": 0, "wealth": 0, "power": 50, "metadata": meta}
                 created = True
-
             sets, params = [], []
             if updates.get("status"):
                 sets.append("status = %s"); params.append(str(updates["status"])[:64])
@@ -288,7 +285,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 sets.append("updated_at = CURRENT_TIMESTAMP")
                 params.append(row["id"])
                 cur.execute(f"UPDATE world_nodes SET {', '.join(sets)} WHERE id = %s", tuple(params))
-
             if updates.get("description"):
                 cur.execute("SELECT metadata FROM world_nodes WHERE id = %s", (row["id"],))
                 mrow = cur.fetchone()

@@ -4,11 +4,13 @@ import { BASE_URL, authHeaders, parseJsonSafe, describeNetworkError } from '../u
 
 export default function StoryDetails({ story, user, onBack, onStartJourney, onEdit }) {
   const [full, setFull] = useState(story || null);
-  const [loading, setLoading] = useState(!story?.premise);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
 
+  // ALWAYS fetch the full story so banner/cover/cast portraits are present
+  // (library card payloads do not carry image columns).
   useEffect(() => {
-    if (story?.premise) return; // already have rich data
+    if (!story?.id) return;
     let alive = true;
     (async () => {
       try {
@@ -61,11 +63,11 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
       )}
 
       <div className="flex-1 overflow-y-auto">
-        {banner && (
-          <div className="h-40 sm:h-56 w-full overflow-hidden bg-gray-900 flex items-center justify-center">
-            <img src={banner} alt={full?.title} className="w-full h-full object-cover" />
+        {banner ? (
+          <div className="h-40 sm:h-56 w-full overflow-hidden bg-gray-900">
+            <img src={banner} alt={full?.title || story.title} className="w-full h-full object-cover" />
           </div>
-        )}
+        ) : null}
 
         <div className="px-4 sm:px-6 py-5 max-w-3xl mx-auto space-y-5">
           <div>

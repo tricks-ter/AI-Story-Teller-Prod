@@ -230,7 +230,6 @@ export default function App() {
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
       setEditingStory(null);
-      // Refresh detail page with updated data
       setDetailsStory(prev => prev && prev.id === storyId ? { ...prev, ...storyData } : prev);
       setView("details");
     } catch (err) {
