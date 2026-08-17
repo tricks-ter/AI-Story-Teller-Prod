@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.6.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.7.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -80,27 +80,14 @@ class StoryCreateRequest(BaseModel):
     characterRole: str
     characterBackground: str
     isPublic: bool = True
-    coverImage: str = ""
-    bannerImage: str = ""
-    characterImage: str = ""
-    starterLocation: str = ""
-    tone: str = ""
     client_telemetry: Optional[dict] = None
 
 class StoryUpdateRequest(BaseModel):
     title: Optional[str] = None
     genre: Optional[str] = None
     premise: Optional[str] = None
-    coverImage: Optional[str] = None
-    bannerImage: Optional[str] = None
-    isPublic: Optional[bool] = None
-    starterLocation: Optional[str] = None
-    tone: Optional[str] = None
-    characterId: Optional[str] = None
-    characterName: Optional[str] = None
-    characterRole: Optional[str] = None
-    characterBackground: Optional[str] = None
-    characterImage: Optional[str] = None
+    cover_image: Optional[str] = None
+    banner_image: Optional[str] = None
 
 class AuthRequest(BaseModel):
     username: str
@@ -122,16 +109,10 @@ class VisibilityRequest(BaseModel):
 class ArtUpdateRequest(BaseModel):
     image: str = ""
     banner: str = ""
-    kind: str = ""
-    data_url: str = ""
 
-class CharArtRequest(BaseModel):
-    data_url: str = ""
-
-class CharacterUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    role: Optional[str] = None
-    background: Optional[str] = None
+class LikeRequest(BaseModel):
+    # Empty body = toggle (backward compatible). Explicit liked = idempotent set (queue-safe).
+    liked: Optional[bool] = None
 
 class StoryCommentRequest(BaseModel):
     content: str
@@ -197,9 +178,6 @@ def _recent_duplicate(last_row, content, window=90):
     except Exception:
         return False
 
-def _valid_data_url(s):
-    return isinstance(s, str) and s.startswith("data:image") and len(s) <= 900_000
-
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
@@ -252,16 +230,11 @@ def list_stories(raw: Request, scope: str = "all"):
         return db.list_stories_for_user(user["id"])
     return db.list_all_stories(user["id"])
 
-# NOTE: declared BEFORE /stories/{story_id} so literals are not captured as a story id.
+# NOTE: declared BEFORE /stories/{story_id} so "art" is not captured as a story id.
 @router.get("/stories/art")
 def stories_art(raw: Request):
     user = require_user(raw)
     return db_ext.get_all_story_art()
-
-@router.get("/stories/social")
-def stories_social(raw: Request):
-    user = require_user(raw)
-    return db_ext.get_all_story_social_counts()
 
 @router.get("/playthroughs")
 def list_playthroughs(raw: Request):
@@ -288,7 +261,7 @@ def get_map(playthrough_id: str, raw: Request):
 def get_inventory(playthrough_id: str, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
-    db_ext.dedupe_stackables(playthrough_id)
+    db_ext.dedupe_stackables(playthrough_id)  # self-healing: merge duplicate coins/materials
     db.ensure_playthrough_inventory(playthrough_id)
     items = db.list_playthrough_items(playthrough_id)
     equipment = db.list_playthrough_equipment(playthrough_id)
@@ -410,53 +383,6 @@ def get_story_detail(story_id: str, raw: Request):
         pass
     return {"story": story, "characters": chars}
 
-@router.get("/stories/{story_id}/cast")
-def get_cast(story_id: str, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    return db_ext.get_cast_with_images(story_id)
-
-# ── Social: likes & comments ──
-@router.get("/stories/{story_id}/social")
-def story_social(story_id: str, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    return db_ext.get_story_social(story_id, user["id"])
-
-@router.post("/stories/{story_id}/like")
-def like_story(story_id: str, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    return db_ext.toggle_story_like(story_id, user["id"])
-
-@router.post("/stories/{story_id}/comments")
-def post_comment(story_id: str, req: StoryCommentRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    content = req.content.strip()
-    if not content or len(content) > 500:
-        raise HTTPException(status_code=400, detail="Comment must be 1–500 characters")
-    row = db_ext.add_story_comment(story_id, user["id"], user["username"], content)
-    if not row: raise HTTPException(status_code=500, detail="Could not post comment. Try again.")
-    return {"id": row["id"], "created_at": str(row["created_at"]), "username": user["username"], "content": content, "user_id": user["id"]}
-
-@router.delete("/stories/{story_id}/comments/{comment_id}")
-def delete_comment(story_id: str, comment_id: int, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    if not db_ext.delete_story_comment(comment_id, user["id"], story.get("creator_id")):
-        raise HTTPException(status_code=403, detail="You can only delete your own comments")
-    return {"status": "deleted"}
-
 @router.patch("/stories/{story_id}")
 def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
     user = require_user(raw)
@@ -475,70 +401,17 @@ def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
     if req.premise is not None:
         p = req.premise.strip()
         if p: fields["premise"] = p[:2000]
-    if req.coverImage is not None:
-        if req.coverImage and not _valid_data_url(req.coverImage): raise HTTPException(status_code=400, detail="Unsupported cover image.")
-        fields["cover_image"] = req.coverImage
-    if req.bannerImage is not None:
-        if req.bannerImage and not _valid_data_url(req.bannerImage): raise HTTPException(status_code=400, detail="Unsupported banner image.")
-        fields["banner_image"] = req.bannerImage
-    if fields and not db_ext.update_story_fields(story_id, fields):
+    if req.cover_image is not None:
+        if len(req.cover_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
+        fields["cover_image"] = req.cover_image
+    if req.banner_image is not None:
+        if len(req.banner_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
+        fields["banner_image"] = req.banner_image
+    if not fields:
+        return {"status": "nothing_to_update"}
+    if not db_ext.update_story_fields(story_id, fields):
         raise HTTPException(status_code=500, detail="Could not save changes. Try again.")
-    if req.isPublic is not None:
-        db.set_story_visibility(story_id, req.isPublic)
-    meta_updates = {}
-    if req.starterLocation is not None:
-        meta_updates["starter_location"] = req.starterLocation.strip()[:120]
-    if req.tone is not None:
-        meta_updates["tone"] = req.tone.strip()[:500]
-    if meta_updates:
-        db_ext.set_story_metadata_keys(story_id, meta_updates)
-    if req.characterId:
-        cfields = {}
-        if req.characterName is not None:
-            cn = req.characterName.strip()
-            if not cn: raise HTTPException(status_code=400, detail="Character name can't be empty")
-            cfields["name"] = cn[:255]
-        if req.characterRole is not None:
-            cfields["role"] = req.characterRole.strip()[:100] or "Character"
-        if req.characterBackground is not None:
-            cfields["background"] = req.characterBackground.strip()[:2000]
-        if cfields and not db_ext.update_story_character(story_id, req.characterId, cfields):
-            raise HTTPException(status_code=404, detail="Character not found in this saga.")
-        if req.characterImage is not None:
-            if req.characterImage and not _valid_data_url(req.characterImage): raise HTTPException(status_code=400, detail="Unsupported portrait image.")
-            db_ext.set_character_image_by_id(story_id, req.characterId, req.characterImage)
-    return {"status": "updated"}
-
-@router.patch("/stories/{story_id}/characters/{char_id}")
-def update_character(story_id: str, char_id: str, req: CharacterUpdateRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    if not db_ext.can_manage_story(story, user["id"]):
-        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
-    fields = {}
-    if req.name is not None:
-        cn = req.name.strip()
-        if not cn: raise HTTPException(status_code=400, detail="Character name can't be empty")
-        fields["name"] = cn[:255]
-    if req.role is not None:
-        fields["role"] = req.role.strip()[:100] or "Character"
-    if req.background is not None:
-        fields["background"] = req.background.strip()[:2000]
-    if fields and not db_ext.update_story_character(story_id, char_id, fields):
-        raise HTTPException(status_code=404, detail="Character not found in this saga.")
-    return {"status": "updated"}
-
-@router.delete("/stories/{story_id}")
-def delete_story(story_id: str, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    if not db_ext.can_manage_story(story, user["id"]):
-        raise HTTPException(status_code=403, detail="Only the author can delete this saga")
-    if not db_ext.delete_story_full(story_id):
-        raise HTTPException(status_code=500, detail="Could not delete the saga. Try again.")
-    return {"status": "deleted"}
+    return {"status": "updated", "fields": list(fields.keys())}
 
 @router.post("/stories/{story_id}/art")
 def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
@@ -549,11 +422,6 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
     banner = req.banner or ""
-    if req.data_url and req.data_url.startswith("data:image"):
-        if str(req.kind).lower() == "banner":
-            banner = req.data_url
-        else:
-            image = req.data_url
     if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
@@ -564,22 +432,6 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=500, detail="Could not save the picture. Try again.")
     if banner and not db_ext.set_story_banner(story_id, banner):
         raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
-    return {"status": "updated"}
-
-@router.post("/stories/{story_id}/characters/{char_id}/art")
-def set_character_art(story_id: str, char_id: str, req: CharArtRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    if not db_ext.can_manage_story(story, user["id"]):
-        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
-    data_url = req.data_url or ""
-    if data_url and not data_url.startswith("data:image"):
-        raise HTTPException(status_code=400, detail="Unsupported image format.")
-    if len(data_url) > 900_000:
-        raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
-    if not db_ext.set_character_image_by_id(story_id, char_id, data_url):
-        raise HTTPException(status_code=404, detail="Character not found in this saga.")
     return {"status": "updated"}
 
 @router.get("/stories/{story_id}/messages")
@@ -648,17 +500,6 @@ def play_story(story_id: str, raw: Request):
     check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
-    try:
-        sm = story.get("metadata") or {}
-        starter = (sm.get("starter_location") or "").strip()
-        pt_meta = pt.get("metadata") or {}
-        if starter and not pt_meta.get("current_location"):
-            db.update_playthrough_location(pt["id"], starter)
-            db.upsert_playthrough_location(pt["id"], starter, f"The journey begins in {starter}.")
-            db_ext.ensure_world_node(pt["id"], starter, kind="settlement", description=f"The journey begins in {starter}.")
-            pt = db.get_playthrough(pt["id"]) or pt
-    except Exception as e:
-        logger.error(f"starter location seed failed: {e}")
     return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
 
 @router.post("/stories")
@@ -670,22 +511,12 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
         "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
         "rules": "Keep responses immersive and descriptive."
     }
-    if request.starterLocation.strip():
-        story_meta["starter_location"] = request.starterLocation.strip()[:120]
-    if request.tone.strip():
-        story_meta["tone"] = request.tone.strip()[:500]
     char_meta = {"stats": {"Health": 100, "MaxHealth": 100, "Mana": 50, "MaxMana": 50}, "inventory": ["Adventurer's Kit"]}
     telemetry = request.client_telemetry
     db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,
                     creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
                            request.characterBackground, metadata=char_meta, telemetry=telemetry)
-    if request.coverImage and _valid_data_url(request.coverImage):
-        db_ext.set_story_art(story_id, request.coverImage)
-    if request.bannerImage and _valid_data_url(request.bannerImage):
-        db_ext.set_story_banner(story_id, request.bannerImage)
-    if request.characterImage and _valid_data_url(request.characterImage):
-        db_ext.set_character_image_by_id(story_id, char_id, request.characterImage)
     intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
     db.add_story_message(story_id, "system", intro_msg, msg_type="intro", telemetry=telemetry)
     return {"story_id": story_id, "status": "created", "title": request.title}
@@ -814,5 +645,51 @@ async def chat_stream(request: ChatRequest, raw: Request):
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+# ── Social: likes & comments (any logged-in user on accessible sagas) ──
+@router.get("/stories/social")
+def stories_social(raw: Request):
+    user = require_user(raw)
+    return db_ext.get_all_story_social_counts()
+
+@router.get("/stories/{story_id}/social")
+def story_social(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.get_story_social(story_id, user["id"])
+
+@router.post("/stories/{story_id}/like")
+def like_story(story_id: str, req: LikeRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    if req.liked is None:
+        return db_ext.toggle_story_like(story_id, user["id"])
+    return db_ext.set_story_like(story_id, user["id"], req.liked)
+
+@router.post("/stories/{story_id}/comments")
+def post_comment(story_id: str, req: StoryCommentRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    content = req.content.strip()
+    if not content or len(content) > 500:
+        raise HTTPException(status_code=400, detail="Comment must be 1–500 characters")
+    row = db_ext.add_story_comment(story_id, user["id"], user["username"], content)
+    if not row: raise HTTPException(status_code=500, detail="Could not post comment. Try again.")
+    return {"id": row["id"], "created_at": str(row["created_at"]), "username": user["username"], "content": content, "user_id": user["id"]}
+
+@router.delete("/stories/{story_id}/comments/{comment_id}")
+def delete_comment(story_id: str, comment_id: int, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.delete_story_comment(comment_id, user["id"], story.get("creator_id")):
+        raise HTTPException(status_code=403, detail="You can only delete your own comments")
+    return {"status": "deleted"}
 
 app.include_router(router)

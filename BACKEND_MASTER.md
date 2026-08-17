@@ -84,3 +84,8 @@ loaders, toast system, share deep-link (?story=<id>), onboarding nudge. NO backe
 changes — search/sort/filter run client-side over already-loaded list data; the deep-link
 reuses the existing GET /api/stories/{id}; toasts/skeletons are pure UI. This contract is
 unchanged and remains authoritative. (See FRONTEND_MASTER §3/§6 for the new UI wiring.)
+
+## ADDENDUM — OPTIMISTIC SOCIAL SPRINT (2026-08-17)
+- POST /api/stories/{id}/like now accepts LikeRequest{liked: Optional[bool]} — empty body toggles (backward compatible), explicit liked = idempotent set via db_ext.set_story_like (ON CONFLICT (story_id,user_id) DO NOTHING) — safe for background-queue retries.
+- New db_ext.set_story_like. Guards unchanged: require_user + check_story_access (any logged-in user on public sagas).
+- app version 7.7.0. Migration 0015_social.sql is a no-op ledger placeholder (PK already supports idempotent sets).

@@ -67,3 +67,9 @@ Frontend-only sprint (search/filter/sort, Recently Played, skeletons, toasts, sh
 deep-link, onboarding). NO schema or query changes — all features run on data already
 returned by existing endpoints (GET /stories, /playthroughs, /stories/art, /stories/social).
 This contract is unchanged and remains authoritative.
+
+## ADDENDUM — OPTIMISTIC SOCIAL SPRINT (2026-08-17)
+- story_likes PK (story_id, user_id) now backs idempotent like sets (ON CONFLICT DO NOTHING) used by the background social queue — retries can never double-like.
+- New db_ext.set_story_like(story_id, user_id, liked) → story_likes.
+- story_comments unchanged; comment deletes remain author-or-story-owner enforced.
+- Migration 0015_social.sql: SELECT 1 ledger placeholder (no schema change needed).

@@ -9,6 +9,7 @@ import StoryCreator from "./components/StoryCreator";
 import AuthPage from "./components/AuthPage";
 import StoryLibrary from "./components/StoryLibrary";
 import StoryDetails from "./components/StoryDetails";
+import Toaster from "./components/Toaster";
 import HUD from "./components/HUD";
 import { streamChat, streamStory, completePlaythrough } from "./utils/api";
 import { listSessions, createSession, getMessages, appendMessage, updateSessionTitle, deleteSession, loadSettings, saveSettings } from "./utils/storage";
@@ -16,17 +17,6 @@ import { getSavedUser, getToken, fetchMe, clearAuth, authHeaders, BASE_URL, pars
 import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPlaythrough, saveLocalPlaythrough, getLocalMessages, saveLocalMessages, clearLocalDB, clearHudCache } from "./utils/localDb";
 import { applyStateUpdateToCache, getCachedStoryContext, cacheInventory } from "./utils/hudStore";
 import { syncQueue } from "./utils/syncQueue";
-
-// FE-BUG-1 FIX + LEVEL SYSTEM HOOK: centralized stat clamps.
-// Level 1 caps: Health 0..100, Mana 0..50. Raising MaxHealth/MaxMana raises caps.
-function clampStat(stat, value, stats = {}) {
-  const v = Number(value);
-  if (Number.isNaN(v)) return value;
-  if (stat === "Health") return Math.max(0, Math.min(v, Number(stats.MaxHealth ?? 100)));
-  if (stat === "Mana") return Math.max(0, Math.min(v, Number(stats.MaxMana ?? 50)));
-  if (stat === "MaxHealth" || stat === "MaxMana") return Math.max(1, Math.min(v, 999));
-  return Math.max(0, Math.min(v, 999));
-}
 
 export default function App() {
   const [view, setView] = useState("landing");
@@ -53,46 +43,21 @@ export default function App() {
   useEffect(() => { setSessions(listSessions()); }, []);
   useEffect(() => { saveSettings(settings); }, [settings]);
   useEffect(() => { fetch(`${BASE_URL}/health`).catch(() => {}); }, []);
-  
   useEffect(() => {
     if (getToken()) {
       getLocalUser().then(localU => { if (localU && !user) setUser(localU); });
-
-      fetchMe().then(u => { 
+      fetchMe().then(u => {
         if (u) {
-          setUser(u); 
+          setUser(u);
           saveLocalUser(u);
           syncQueue.enqueue('SYNC_LIBRARY', { userId: u.id });
-        } else { 
-          clearAuth(); 
-          setUser(null); 
-        } 
+        } else {
+          clearAuth();
+          setUser(null);
+        }
       });
     }
   }, []);
-
-  // SHARE DEEP-LINK: /?story=<id> opens the story details page directly.
-  useEffect(() => {
-    let sid = null;
-    try { sid = new URLSearchParams(window.location.search).get('story'); } catch {}
-    if (!sid || !user) return;
-    try { window.history.replaceState({}, '', window.location.pathname); } catch {}
-    let alive = true;
-    (async () => {
-      try {
-        const res = await fetch(`${BASE_URL}/stories/${sid}`, { headers: authHeaders() });
-        const data = await parseJsonSafe(res);
-        if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
-        if (!alive) return;
-        setDetailsStory({ ...data.story, characters: data.characters || [] });
-        setView("details");
-      } catch (e) {
-        if (!alive) return;
-        setView("library");
-      }
-    })();
-    return () => { alive = false; };
-  }, [user?.id]);
 
   const refreshSessions = () => setSessions(listSessions());
 
@@ -202,7 +167,7 @@ export default function App() {
         timestamp: m.created_at,
         narrative: true
       }));
-      
+
       setMessages(mapped);
       mapped.forEach(m => appendMessage(session.session_id, m));
       if (mapped.length > 0) await saveLocalMessages(pt.id, mapped, true);
@@ -243,8 +208,11 @@ export default function App() {
 
   const handleUpdateStory = async (storyId, storyData) => {
     try {
-      // Pass the FULL payload through (title/genre/premise/images/visibility/starter/tone/character)
-      const enriched = await withTelemetry(storyData);
+      const enriched = await withTelemetry({
+        title: storyData.title,
+        genre: storyData.genre,
+        premise: storyData.premise,
+      });
       const res = await fetch(`${BASE_URL}/stories/${storyId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -328,7 +296,8 @@ export default function App() {
               if (up.type === "LOCATION_UPDATE") {
                 newContext.current_location = up.location;
               } else if (up.type === "STAT_UPDATE") {
-                // FE-BUG-1 FIX: signed updates are deltas — add to current, then clamp.
+                // FE-BUG-1 FIX: signed updates are deltas — add to current value, then clamp.
+                // Health 0..MaxHealth (def 100), Mana 0..MaxMana (def 50). Level-ready.
                 const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
                 if (charIdx !== -1) {
                   const c = newChars[charIdx];
@@ -337,7 +306,9 @@ export default function App() {
                   const fallback = up.stat === "Health" ? 100 : up.stat === "Mana" ? 50 : 0;
                   const current = Number(stats[up.stat] ?? fallback);
                   const next = up.is_delta ? current + Number(up.value) : Number(up.value);
-                  stats[up.stat] = clampStat(up.stat, next, stats);
+                  const cap = up.stat === "Health" ? Number(stats.MaxHealth ?? 100)
+                    : up.stat === "Mana" ? Number(stats.MaxMana ?? 50) : 999;
+                  stats[up.stat] = Math.max(0, Math.min(Number(next), cap));
                   meta.stats = stats;
                   newChars[charIdx] = { ...c, metadata: meta };
                 }
@@ -371,13 +342,13 @@ export default function App() {
               }
             }
             newContext.characters = newChars;
-            
+
             if (newContext.playthrough_id) {
               applyStateUpdateToCache(newContext.playthrough_id, newContext);
               syncQueue.enqueue('SYNC_HUD', { ptId: newContext.playthrough_id, key: 'inventory' }, 'normal');
               syncQueue.enqueue('SYNC_HUD', { ptId: newContext.playthrough_id, key: 'world' }, 'normal');
             }
-            
+
             return newContext;
           });
         } else if (event.type === "error") {
@@ -429,6 +400,7 @@ export default function App() {
 
   return (
     <div className="flex h-[100dvh] bg-gray-900 text-gray-100 overflow-hidden">
+      <Toaster />
       {sidebarOpen && <div className="fixed inset-0 bg-black/60 z-20 md:hidden" onClick={() => setSidebarOpen(false)} />}
       {settingsOpen && <SettingsPanel settings={settings} onChange={handleSettingsChange} onClose={() => setSettingsOpen(false)} />}
       <Sidebar sessions={sessions} activeId={activeSessionId} onSelect={handleSelectSession} onCreate={handleNewChat} onDelete={handleDeleteSession} isOpen={sidebarOpen} />

@@ -52,3 +52,13 @@ Boot GET /health + /auth/me · auth POST /auth/* · library GET /stories, /playt
 
 ## 8. MAINTENANCE RULES
 New component → §3 entry + §6 for its calls. New util → §4. New IndexedDB store → bump DB_VERSION + §4. Any backend call here must exist in BACKEND_MASTER §5 first.
+
+## ADDENDUM — OPTIMISTIC SOCIAL SPRINT (2026-08-17)
+- FE-BUG-1 RESOLVED: App.jsx STAT_UPDATE adds deltas to the current value, clamps Health 0..MaxHealth (def 100) / Mana 0..MaxMana (def 50) — level-ready.
+- FE-BUG-2 RESOLVED: syncQueue SYNC_HUD now handles key 'world' (world-nodes + world-events → hud_cache 'world').
+- New SOCIAL_ACTION queue processor: like (idempotent explicit set {liked}), comment_add (rollback + toast on failure via 'inkmind-social-fail' window event), comment_delete (404 tolerated).
+- StoryDetails v3: optimistic like/comment post/delete (instant UI, zero latency), social painted from hud_cache('social') instantly then cloud-refreshed, Share button copies /?story=<id> (private sagas warn only-author-can-open), Toaster mounted in chat layout.
+- New utils/toast.js bus + components/Toaster.jsx.
+- Access rule verified: any logged-in user can like/comment/share on PUBLIC sagas (require_user + check_story_access); private sagas remain author-only.
+## ADDENDUM — SOCIAL QUEUE LATENCY MODEL
+UI writes instantly → local cache (hud_cache 'social') → SOCIAL_ACTION reconciles with DB in background (requestIdleCallback, offline pause, dedupe). Failure paths: failed comment is rolled back locally + toast; failed like is logged (next social fetch corrects the count).

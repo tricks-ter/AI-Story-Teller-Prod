@@ -64,46 +64,8 @@ def get_cast_with_images(story_id):
         "SELECT id, name, role, background, is_player, image FROM story_characters WHERE story_id = %s "
         "ORDER BY is_player DESC, created_at ASC", (story_id,), fetch="all") or []
 
-def update_story_character(story_id, char_id, fields):
-    try:
-        row = db.execute_query(
-            "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
-            (char_id, story_id), fetch="one")
-        if not row:
-            return False
-        allowed = {"name", "role", "background"}
-        sets, params = [], []
-        for k, v in (fields or {}).items():
-            if k in allowed and v is not None:
-                sets.append(f"{k} = %s"); params.append(str(v))
-        if not sets:
-            return True
-        params.append(char_id)
-        db.execute_query(f"UPDATE story_characters SET {', '.join(sets)} WHERE id = %s",
-                         tuple(params), fetch="none", commit=True)
-        return True
-    except Exception as e:
-        logger.error(f"update_story_character failed: {e}")
-        return False
-
-def set_story_metadata_keys(story_id, updates):
-    try:
-        def fn(cur):
-            cur.execute("SELECT metadata FROM stories WHERE id = %s", (story_id,))
-            row = cur.fetchone()
-            if not row: return False
-            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
-            for k, v in (updates or {}).items():
-                meta[k] = v
-            cur.execute("UPDATE stories SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
-                        (json.dumps(meta), story_id))
-            return True
-        return db._with_conn(fn, commit=True) is True
-    except Exception as e:
-        logger.error(f"set_story_metadata_keys failed: {e}")
-        return False
-
 def can_manage_story(story, user_id):
+    """Owner — or anyone may adopt a legacy (pre-auth) story."""
     owner = story.get("creator_id")
     return owner == user_id or owner in (None, "", LEGACY_USER_ID)
 
@@ -120,87 +82,6 @@ def update_story_fields(story_id, fields):
                      tuple(params), fetch="none", commit=True)
     return True
 
-def delete_story_full(story_id):
-    """FK ON DELETE CASCADE removes characters, messages, notes, playthroughs, likes, comments."""
-    try:
-        db.execute_query("DELETE FROM stories WHERE id = %s", (story_id,), fetch="none", commit=True)
-        return True
-    except Exception as e:
-        logger.error(f"delete_story_full failed: {e}")
-        return False
-
-# ── Social: Likes & Comments (0014) ──
-def toggle_story_like(story_id, user_id):
-    def fn(cur):
-        cur.execute("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
-        exists = cur.fetchone()
-        if exists:
-            cur.execute("DELETE FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
-            liked = False
-        else:
-            cur.execute("INSERT INTO story_likes (story_id, user_id, created_at) VALUES (%s, %s, CURRENT_TIMESTAMP)",
-                        (story_id, user_id))
-            liked = True
-        cur.execute("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,))
-        count = int(cur.fetchone()["c"])
-        return {"liked": liked, "like_count": count}
-    return db._with_conn(fn, commit=True) or {"liked": False, "like_count": 0}
-
-def get_story_social(story_id, user_id):
-    try:
-        likes = db.execute_query("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,), fetch="one")
-        mine = db.execute_query("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s",
-                                (story_id, user_id), fetch="one")
-        comments = db.execute_query(
-            "SELECT id, user_id, username, content, created_at FROM story_comments "
-            "WHERE story_id = %s ORDER BY created_at DESC LIMIT 50",
-            (story_id,), fetch="all") or []
-        return {"liked": mine is not None, "like_count": int(likes["c"]) if likes else 0, "comments": comments}
-    except Exception as e:
-        logger.error(f"get_story_social failed: {e}")
-        return {"liked": False, "like_count": 0, "comments": []}
-
-def add_story_comment(story_id, user_id, username, content):
-    try:
-        return db.execute_query(
-            "INSERT INTO story_comments (story_id, user_id, username, content, created_at) "
-            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING id, created_at",
-            (story_id, user_id, username or "Adventurer", content), fetch="one", commit=True)
-    except Exception as e:
-        logger.error(f"add_story_comment failed: {e}")
-        return None
-
-def delete_story_comment(comment_id, user_id, story_owner_id=None):
-    """Allowed for the comment author or the story author (legacy-claim included)."""
-    try:
-        def fn(cur):
-            cur.execute("SELECT user_id FROM story_comments WHERE id = %s", (comment_id,))
-            row = cur.fetchone()
-            if not row: return False
-            is_comment_author = row["user_id"] == user_id
-            is_story_owner = story_owner_id is not None and (story_owner_id == user_id or story_owner_id in (None, "", LEGACY_USER_ID))
-            if not (is_comment_author or is_story_owner): return False
-            cur.execute("DELETE FROM story_comments WHERE id = %s", (comment_id,))
-            return True
-        return db._with_conn(fn, commit=True) is True
-    except Exception as e:
-        logger.error(f"delete_story_comment failed: {e}")
-        return False
-
-def get_all_story_social_counts():
-    try:
-        likes = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_likes GROUP BY story_id", fetch="all") or []
-        comments = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_comments GROUP BY story_id", fetch="all") or []
-        out = {}
-        for r in likes:
-            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["likes"] = int(r["c"])
-        for r in comments:
-            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["comments"] = int(r["c"])
-        return out
-    except Exception as e:
-        logger.error(f"get_all_story_social_counts failed: {e}")
-        return {}
-
 # ── Inventory: stacking & self-healing dedupe ──
 def find_stackable_item(playthrough_id, character_id, name):
     return db.execute_query(
@@ -216,6 +97,7 @@ def bump_item_quantity(playthrough_id, item_id, qty=1):
     return True
 
 def dedupe_stackables(playthrough_id):
+    """Merge duplicate stackable rows (same character + name). Idempotent & cheap."""
     try:
         def fn(cur):
             cur.execute(
@@ -259,6 +141,7 @@ def get_world_nodes_full(playthrough_id):
         return db.get_world_nodes(playthrough_id)
 
 def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
+    """Create-if-missing so map/world stays persistent. Never overwrites state."""
     try:
         def fn(cur):
             cur.execute(
@@ -287,6 +170,7 @@ def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
         return None
 
 def update_world_node_state(playthrough_id, node_name, updates):
+    """Upsert an entity and apply state changes. Signed values = deltas."""
     try:
         def fn(cur):
             cur.execute(
@@ -409,3 +293,89 @@ def set_memory_summary(playthrough_id, summary):
                     (json.dumps(meta), playthrough_id))
         return True
     return db._with_conn(fn, commit=True) is True
+
+# ── Social: Likes & Comments (0014 + 0015 optimistic layer) ──
+def toggle_story_like(story_id, user_id):
+    def fn(cur):
+        cur.execute("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+        exists = cur.fetchone()
+        if exists:
+            cur.execute("DELETE FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+            liked = False
+        else:
+            cur.execute("INSERT INTO story_likes (story_id, user_id, created_at) VALUES (%s, %s, CURRENT_TIMESTAMP)",
+                        (story_id, user_id))
+            liked = True
+        cur.execute("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,))
+        count = int(cur.fetchone()["c"])
+        return {"liked": liked, "like_count": count}
+    return db._with_conn(fn, commit=True) or {"liked": False, "like_count": 0}
+
+def set_story_like(story_id, user_id, liked):
+    """Idempotent explicit set — safe for background-queue retries."""
+    def fn(cur):
+        if liked:
+            cur.execute(
+                "INSERT INTO story_likes (story_id, user_id, created_at) VALUES (%s, %s, CURRENT_TIMESTAMP) "
+                "ON CONFLICT (story_id, user_id) DO NOTHING", (story_id, user_id))
+        else:
+            cur.execute("DELETE FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+        cur.execute("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,))
+        count = int(cur.fetchone()["c"])
+        return {"liked": bool(liked), "like_count": count}
+    return db._with_conn(fn, commit=True) or {"liked": bool(liked), "like_count": 0}
+
+def get_story_social(story_id, user_id):
+    try:
+        likes = db.execute_query("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,), fetch="one")
+        mine = db.execute_query("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s",
+                                (story_id, user_id), fetch="one")
+        comments = db.execute_query(
+            "SELECT id, user_id, username, content, created_at FROM story_comments "
+            "WHERE story_id = %s ORDER BY created_at DESC LIMIT 50",
+            (story_id,), fetch="all") or []
+        return {"liked": mine is not None, "like_count": int(likes["c"]) if likes else 0, "comments": comments}
+    except Exception as e:
+        logger.error(f"get_story_social failed: {e}")
+        return {"liked": False, "like_count": 0, "comments": []}
+
+def add_story_comment(story_id, user_id, username, content):
+    try:
+        return db.execute_query(
+            "INSERT INTO story_comments (story_id, user_id, username, content, created_at) "
+            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING id, created_at",
+            (story_id, user_id, username or "Adventurer", content), fetch="one", commit=True)
+    except Exception as e:
+        logger.error(f"add_story_comment failed: {e}")
+        return None
+
+def delete_story_comment(comment_id, user_id, story_owner_id=None):
+    """Allowed for the comment author or the story author (legacy-claim included)."""
+    try:
+        def fn(cur):
+            cur.execute("SELECT user_id FROM story_comments WHERE id = %s", (comment_id,))
+            row = cur.fetchone()
+            if not row: return False
+            is_comment_author = row["user_id"] == user_id
+            is_story_owner = story_owner_id is not None and (story_owner_id == user_id or story_owner_id in (None, "", LEGACY_USER_ID))
+            if not (is_comment_author or is_story_owner): return False
+            cur.execute("DELETE FROM story_comments WHERE id = %s", (comment_id,))
+            return True
+        return db._with_conn(fn, commit=True) is True
+    except Exception as e:
+        logger.error(f"delete_story_comment failed: {e}")
+        return False
+
+def get_all_story_social_counts():
+    try:
+        likes = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_likes GROUP BY story_id", fetch="all") or []
+        comments = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_comments GROUP BY story_id", fetch="all") or []
+        out = {}
+        for r in likes:
+            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["likes"] = int(r["c"])
+        for r in comments:
+            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["comments"] = int(r["c"])
+        return out
+    except Exception as e:
+        logger.error(f"get_all_story_social_counts failed: {e}")
+        return {}

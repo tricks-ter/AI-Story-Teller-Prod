@@ -9,7 +9,7 @@ export function subscribeToast(fn) {
 
 export function toast(message, kind = 'info') {
   const item = { id: `${Date.now()}-${Math.random()}`, message, kind };
-  listeners.forEach(fn => { try { fn(item); } catch {} });
+  listeners.forEach(fn => fn(item));
 }
 toast.success = (m) => toast(m, 'success');
 toast.error = (m) => toast(m, 'error');

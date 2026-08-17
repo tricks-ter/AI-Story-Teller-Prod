@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon, Heart, MessageCircle, Send, Trash2, MapPin, Feather, Share2 } from 'lucide-react';
+import React, { useEffect, useState, useCallback } from 'react';
+import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon, Heart, MessageCircle, Send, Trash2 } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, describeNetworkError } from '../utils/auth';
 import { toast } from '../utils/toast';
-import Toaster from './Toaster';
+import { syncQueue } from '../utils/syncQueue';
+import { getHudCache, setHudCache } from '../utils/localDb';
 
 function timeAgo(iso) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -17,36 +18,70 @@ function timeAgo(iso) {
 export default function StoryDetails({ story, user, onBack, onStartJourney, onEdit }) {
   const [full, setFull] = useState(story || null);
   const [social, setSocial] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!story?.premise);
   const [err, setErr] = useState(null);
-  const [expandedCast, setExpandedCast] = useState({});
   const [commentText, setCommentText] = useState('');
-  const [posting, setPosting] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const storyId = story?.id;
+
+  // Persist optimistic social state locally so it survives refresh/back navigation
+  const persistSocial = useCallback(async (next) => {
+    setSocial(next);
+    if (storyId) { try { await setHudCache(storyId, 'social', next); } catch {} }
+  }, [storyId]);
+
+  // Roll back an optimistic comment if the background queue fails
+  useEffect(() => {
+    const onFail = (e) => {
+      const d = e.detail || {};
+      if (d.storyId !== storyId || d.kind !== 'comment') return;
+      setSocial(prev => {
+        if (!prev) return prev;
+        const comments = (prev.comments || []).filter(c => c.id !== d.tempId);
+        const next = { ...prev, comments };
+        setHudCache(storyId, 'social', next).catch(() => {});
+        return next;
+      });
+    };
+    window.addEventListener('inkmind-social-fail', onFail);
+    return () => window.removeEventListener('inkmind-social-fail', onFail);
+  }, [storyId]);
 
   useEffect(() => {
-    if (!story?.id) return;
+    if (!storyId) return;
     let alive = true;
     (async () => {
+      // 1) Instant paint from local cache
       try {
-        const [sRes, socRes] = await Promise.all([
-          fetch(`${BASE_URL}/stories/${story.id}`, { headers: authHeaders() }),
-          fetch(`${BASE_URL}/stories/${story.id}/social`, { headers: authHeaders() }),
-        ]);
-        const data = await parseJsonSafe(sRes);
-        if (!sRes.ok) throw new Error(data?.detail || 'Could not load story');
-        const soc = socRes.ok ? await parseJsonSafe(socRes) : null;
-        if (!alive) return;
-        setFull(prev => ({ ...(prev || story), ...data.story, characters: data.characters || [] }));
-        if (soc) setSocial(soc);
+        const cachedSocial = await getHudCache(storyId, 'social');
+        if (alive && cachedSocial) setSocial(cachedSocial);
+      } catch {}
+      // 2) Full story (if the card payload lacks premise)
+      try {
+        if (!story?.premise) {
+          const res = await fetch(`${BASE_URL}/stories/${storyId}`, { headers: authHeaders() });
+          const data = await parseJsonSafe(res);
+          if (!res.ok) throw new Error(data?.detail || 'Could not load story');
+          if (alive) setFull(prev => ({ ...(prev || story), ...data.story, characters: data.characters || [] }));
+        }
       } catch (e) {
         if (alive) setErr(describeNetworkError(e));
-      } finally {
-        if (alive) setLoading(false);
       }
+      // 3) Fresh social from cloud, then cache it
+      try {
+        const socRes = await fetch(`${BASE_URL}/stories/${storyId}/social`, { headers: authHeaders() });
+        if (socRes.ok) {
+          const soc = await parseJsonSafe(socRes);
+          if (alive && soc) {
+            setSocial(soc);
+            try { await setHudCache(storyId, 'social', soc); } catch {}
+          }
+        }
+      } catch {}
+      if (alive) setLoading(false);
     })();
     return () => { alive = false; };
-  }, [story?.id]);
+  }, [storyId, story?.premise]);
 
   if (!story) return null;
 
@@ -55,13 +90,55 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
   const isPublic = full?.is_public ?? story.is_public ?? true;
   const cast = (full?.characters || []).slice(0, 6);
   const banner = full?.banner_image || full?.cover_image;
-  const meta = full?.metadata || {};
 
-  const handleCopyLink = async () => {
-    const url = `${window.location.origin}${window.location.pathname}?story=${story.id}`;
+  // ── OPTIMISTIC LIKE ──
+  const handleLike = async () => {
+    const nextLiked = !(social?.liked);
+    const delta = nextLiked ? 1 : -1;
+    await persistSocial({
+      liked: nextLiked,
+      like_count: Math.max(0, (social?.like_count || 0) + delta),
+      comments: social?.comments || [],
+    });
+    syncQueue.enqueue('SOCIAL_ACTION', { storyId, action: 'like', liked: nextLiked }, 'high');
+  };
+
+  // ── OPTIMISTIC COMMENT POST ──
+  const handlePostComment = async () => {
+    const content = commentText.trim();
+    if (!content) return;
+    const tempId = `temp-${Date.now()}`;
+    await persistSocial({
+      liked: !!social?.liked,
+      like_count: social?.like_count || 0,
+      comments: [
+        { id: tempId, user_id: user?.id, username: user?.username || 'You', content, created_at: new Date().toISOString() },
+        ...(social?.comments || []),
+      ],
+    });
+    setCommentText('');
+    syncQueue.enqueue('SOCIAL_ACTION', { storyId, action: 'comment_add', content, tempId }, 'high');
+  };
+
+  // ── OPTIMISTIC COMMENT DELETE ──
+  const handleDeleteComment = async (cid) => {
+    const isTemp = String(cid).startsWith('temp-');
+    await persistSocial({
+      liked: !!social?.liked,
+      like_count: social?.like_count || 0,
+      comments: (social?.comments || []).filter(c => c.id !== cid),
+    });
+    if (!isTemp) {
+      syncQueue.enqueue('SOCIAL_ACTION', { storyId, action: 'comment_delete', commentId: cid }, 'normal');
+    }
+  };
+
+  // ── SHARE (works for every user; private sagas warn) ──
+  const handleShare = async () => {
+    const url = `${window.location.origin}/?story=${storyId}`;
     try {
       await navigator.clipboard.writeText(url);
-      toast.success('Share link copied');
+      toast.success(isPublic ? 'Share link copied' : 'Link copied — private saga, only you can open it');
     } catch {
       try {
         const ta = document.createElement('textarea');
@@ -77,72 +154,8 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
     }
   };
 
-  const handleLike = async () => {
-    try {
-      const res = await fetch(`${BASE_URL}/stories/${story.id}/like`, { method: 'POST', headers: authHeaders() });
-      const data = await parseJsonSafe(res);
-      if (res.ok) setSocial(prev => ({ ...(prev || { comments: [] }), ...data }));
-    } catch (e) { console.warn('[like]', e); }
-  };
-
-  const handlePostComment = async () => {
-    const content = commentText.trim();
-    if (!content || posting) return;
-    setPosting(true);
-    try {
-      const res = await fetch(`${BASE_URL}/stories/${story.id}/comments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ content }),
-      });
-      const data = await parseJsonSafe(res);
-      if (res.ok) {
-        setSocial(prev => ({ ...(prev || { liked: false, like_count: 0 }), comments: [data, ...(prev?.comments || [])] }));
-        setCommentText('');
-        toast.success('Comment posted');
-      } else {
-        toast.error(data?.detail || 'Could not post comment');
-      }
-    } catch (e) {
-      toast.error(describeNetworkError(e));
-    } finally {
-      setPosting(false);
-    }
-  };
-
-  const handleDeleteComment = async (cid) => {
-    try {
-      const res = await fetch(`${BASE_URL}/stories/${story.id}/comments/${cid}`, { method: 'DELETE', headers: authHeaders() });
-      if (res.ok) {
-        setSocial(prev => prev ? { ...prev, comments: (prev.comments || []).filter(c => c.id !== cid) } : prev);
-        toast.success('Comment deleted');
-      }
-    } catch (e) { console.warn('[delete comment]', e); }
-  };
-
-  const handleDeleteStory = async () => {
-    if (!confirmDelete) {
-      setConfirmDelete(true);
-      setTimeout(() => setConfirmDelete(false), 3000);
-      return;
-    }
-    try {
-      const res = await fetch(`${BASE_URL}/stories/${story.id}`, { method: 'DELETE', headers: authHeaders() });
-      if (res.ok) { toast.success('Saga deleted'); onBack(); }
-      else {
-        const data = await parseJsonSafe(res);
-        toast.error(data?.detail || 'Could not delete the saga');
-        setConfirmDelete(false);
-      }
-    } catch (e) {
-      toast.error(describeNetworkError(e));
-      setConfirmDelete(false);
-    }
-  };
-
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">
-      <Toaster />
       <header className="flex items-center gap-2 px-3 py-3 border-b border-gray-800 bg-gray-900 flex-shrink-0">
         <button onClick={onBack} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center touch-manipulation">
           <ArrowLeft size={18} />
@@ -153,57 +166,35 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
             {full?.creator_name ? `by ${full.creator_name}` : (story.creator_name ? `by ${story.creator_name}` : 'Unknown author')}
           </p>
         </div>
-        <button
-          onClick={handleCopyLink}
-          className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium min-h-[44px] touch-manipulation active:scale-95"
-          title="Copy share link"
-        >
-          <Share2 size={14} /> Share
-        </button>
         {isOwner && (
-          <>
-            <button
-              onClick={() => onEdit(full || story)}
-              className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium min-h-[44px] touch-manipulation active:scale-95"
-            >
-              <Pencil size={14} /> Edit
-            </button>
-            <button
-              onClick={handleDeleteStory}
-              className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-medium min-h-[44px] touch-manipulation active:scale-95 ${confirmDelete ? 'bg-red-600 text-white' : 'bg-gray-800 hover:bg-red-600/40 text-red-400'}`}
-              title="Delete saga"
-            >
-              {confirmDelete ? 'Sure?' : <Trash2 size={14} />}
-            </button>
-          </>
+          <button
+            onClick={() => onEdit(full || story)}
+            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium min-h-[44px] touch-manipulation active:scale-95"
+          >
+            <Pencil size={14} /> Edit
+          </button>
         )}
       </header>
 
       {err && (
-        <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/20 text-red-400 text-sm flex items-center justify-between">
-          <span>{err}</span>
-          <button onClick={() => setErr(null)} className="text-red-300 text-xs underline">dismiss</button>
-        </div>
+        <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/20 text-red-400 text-sm">{err}</div>
       )}
 
       <div className="flex-1 overflow-y-auto">
         {banner && (
-          <div className="h-40 sm:h-56 w-full overflow-hidden bg-gray-900">
-            <img src={banner} alt={full?.title || story.title} className="w-full h-full object-cover" />
+          <div className="h-40 sm:h-56 w-full overflow-hidden bg-gray-900 flex items-center justify-center">
+            <img src={banner} alt={full?.title} className="w-full h-full object-cover" />
           </div>
         )}
 
         <div className="px-4 sm:px-6 py-5 max-w-3xl mx-auto space-y-5">
           <div>
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
+            <div className="flex items-center gap-2 mb-2">
               <span className="text-[10px] font-bold uppercase tracking-wide text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">{full?.genre || story.genre}</span>
               {isPublic ? (
                 <span className="text-[10px] text-emerald-400 flex items-center gap-1"><Globe size={10} /> Public</span>
               ) : (
                 <span className="text-[10px] text-amber-400 flex items-center gap-1"><Lock size={10} /> Private</span>
-              )}
-              {meta.starter_location && (
-                <span className="text-[10px] text-blue-300 flex items-center gap-1"><MapPin size={10} /> {meta.starter_location}</span>
               )}
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold text-white leading-tight">{full?.title || story.title}</h1>
@@ -212,72 +203,66 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
                 by <span className="text-gray-200 font-medium">{full?.creator_name || story.creator_name}</span>
               </p>
             )}
-            {meta.tone && (
-              <p className="text-xs text-gray-500 italic mt-2 flex items-center gap-1.5"><Feather size={11} /> {meta.tone}</p>
-            )}
-            {/* Like button */}
-            <div className="flex items-center gap-3 mt-3">
-              <button
-                onClick={handleLike}
-                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium min-h-[44px] touch-manipulation active:scale-95 transition-colors ${
-                  social?.liked ? 'bg-pink-500/20 text-pink-400 border border-pink-500/40' : 'bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700'
-                }`}
-              >
-                <Heart size={16} className={social?.liked ? 'fill-pink-400' : ''} />
-                {social?.liked ? 'Liked' : 'Like'}
-                <span className="text-xs opacity-80">({social?.like_count ?? 0})</span>
-              </button>
-              <span className="flex items-center gap-1.5 text-xs text-gray-500">
-                <MessageCircle size={13} /> {(social?.comments || []).length} comment{(social?.comments || []).length === 1 ? '' : 's'}
-              </span>
-            </div>
+          </div>
+
+          {/* Like / Comment / Share bar — instant, queue-backed */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleLike}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium min-h-[44px] touch-manipulation active:scale-95 transition-colors ${
+                social?.liked ? 'bg-pink-500/20 text-pink-400 border border-pink-500/40' : 'bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700'
+              }`}
+            >
+              <Heart size={16} className={social?.liked ? 'fill-pink-400' : ''} />
+              {social?.liked ? 'Liked' : 'Like'}
+              <span className="text-xs opacity-80">({social?.like_count ?? 0})</span>
+            </button>
+            <span className="flex items-center gap-1.5 text-xs text-gray-500 px-2">
+              <MessageCircle size={13} /> {(social?.comments || []).length} comment{(social?.comments || []).length === 1 ? '' : 's'}
+            </span>
+            <button
+              onClick={handleShare}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium min-h-[44px] bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 touch-manipulation active:scale-95"
+            >
+              <Send size={14} /> Share
+            </button>
           </div>
 
           <div>
             <h3 className="text-[11px] uppercase tracking-wide text-gray-500 font-bold mb-1.5">Premise</h3>
-            <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{full?.premise || story.premise}</p>
+            <p className="text-sm text-gray-300 leading-relaxed">{full?.premise || story.premise}</p>
           </div>
 
           {cast.length > 0 && (
             <div>
               <h3 className="text-[11px] uppercase tracking-wide text-gray-500 font-bold mb-2 flex items-center gap-1.5">
-                <Users size={12} /> Cast <span className="normal-case font-normal text-gray-600">— tap a card for full background</span>
+                <Users size={12} /> Cast
               </h3>
               <div className="space-y-2">
-                {cast.map(c => {
-                  const expanded = !!expandedCast[c.id];
-                  return (
-                    <div
-                      key={c.id}
-                      onClick={() => setExpandedCast(p => ({ ...p, [c.id]: !p[c.id] }))}
-                      className="bg-gray-900/60 border border-gray-800 hover:border-purple-500/40 rounded-xl p-3 flex items-start gap-3 cursor-pointer touch-manipulation active:scale-[0.99] transition-colors"
-                    >
-                      {c.image ? (
-                        <img src={c.image} alt={c.name} className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800" />
-                      ) : (
-                        <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
-                          <Sparkles size={14} className="text-purple-400" />
-                        </div>
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-semibold text-white truncate">{c.name}</p>
-                          {c.is_player && <span className="text-[9px] uppercase font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">You</span>}
-                        </div>
-                        <p className="text-[11px] text-gray-500">{c.role}</p>
-                        {c.background && (
-                          <p className={`text-[11px] text-gray-400 mt-0.5 ${expanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{c.background}</p>
-                        )}
-                        {c.background && !expanded && <p className="text-[10px] text-purple-400/70 mt-1">Read more ▾</p>}
+                {cast.map(c => (
+                  <div key={c.id} className="bg-gray-900/60 border border-gray-800 rounded-xl p-3 flex items-start gap-3">
+                    {c.image ? (
+                      <img src={c.image} alt={c.name} className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800" />
+                    ) : (
+                      <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
+                        <Sparkles size={14} className="text-purple-400" />
                       </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-semibold text-white truncate">{c.name}</p>
+                        {c.is_player && <span className="text-[9px] uppercase font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">You</span>}
+                      </div>
+                      <p className="text-[11px] text-gray-500">{c.role}</p>
+                      {c.background && <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-2">{c.background}</p>}
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
             </div>
           )}
 
-          {/* Comments */}
+          {/* Comments — optimistic list */}
           <div>
             <h3 className="text-[11px] uppercase tracking-wide text-gray-500 font-bold mb-2 flex items-center gap-1.5">
               <MessageCircle size={12} /> Reader Comments
@@ -294,7 +279,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
               />
               <button
                 onClick={handlePostComment}
-                disabled={!commentText.trim() || posting}
+                disabled={!commentText.trim()}
                 className="px-4 rounded-xl bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white min-h-[44px] min-w-[44px] flex items-center justify-center touch-manipulation active:scale-95"
               >
                 <Send size={15} />
@@ -305,7 +290,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
             ) : (
               <div className="space-y-2">
                 {(social?.comments || []).map(c => (
-                  <div key={c.id} className="bg-gray-900/60 border border-gray-800 rounded-xl px-3 py-2.5">
+                  <div key={c.id} className={`bg-gray-900/60 border border-gray-800 rounded-xl px-3 py-2.5 ${String(c.id).startsWith('temp-') ? 'opacity-70' : ''}`}>
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-xs font-semibold text-purple-300 truncate">{c.username}</p>
                       <span className="flex items-center gap-2 flex-shrink-0">
@@ -331,7 +316,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
             </div>
           )}
 
-          <div className="pt-2 flex flex-col gap-2 pb-6">
+          <div className="pt-2 flex flex-col gap-2">
             <button
               onClick={() => onStartJourney(full || story)}
               disabled={loading}
