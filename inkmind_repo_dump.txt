@@ -1,15 +1,15 @@
 =====REPO DUMP=====
-COMMIT: f32ebcc57cc8037026206f8f455f23acc568c22c
+COMMIT: b65ef68841653066ca2c8a0e258404c10efd193a
 BRANCH: main
-DATE: Thu Aug 13 14:06:50 +06 2026
+DATE: Mon Aug 17 15:37:55 +06 2026
 --- LAST 5 COMMITS ---
-f32ebcc webUI updated
-0496c9c fix: deploy critical hotfixes - stat deltas, coin dedupe, world persistence, banner editing
-1917699 worldsyntax fix
-b2abd33 7B done
-bd10f62 feat: phase-7 procedural world expansion foundation & missing phase-6 methods
+b65ef68 feat: social layer (likes/comments), author story delete, interactive story details
+1bf005a feat: story preview images fix, comprehensive forge + edit sync, create master contracts
+56a8c22 feat: comprehensive story forge (3-step form, images, starter location, tone, visibility) + FE-BUG-1 stat clamp fix
+9f8f843 feat: comprehensive story creation/edit forge with images, tone, starter location + FE-BUG-1 stat delta fix
+f84c7bc fix: FE-BUG-1 stat deltas+clamps (HP 0-100, MP 0-50, level-ready), implement art.js endpoints (A-3/B-1), add master contracts
 --- UNCOMMITTED CHANGES ---
-?? inkmind_repo_dump.txt
+ M inkmind_repo_dump.txt
 =====================
 
 =====FILE: .github/workflows/deploy-pages.yml=====
@@ -146,6 +146,152 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+=====FILE: BACKEND_MASTER.md=====
+# BACKEND MASTER CONTRACT — InkMind
+> Verified vs commit f32ebcc + "comprehensive forge + masters" commit. APPEND-ONLY.
+> Keep FRONTEND_MASTER §6 and DATABASE_MASTER §4 consistent with any change.
+
+## 1. STACK & DEPLOY
+FastAPI 0.115.5 on Vercel serverless · api/main.py · APIRouter(prefix="/api") mounted at file end · app v7.5.0. vercel.json: /api/(.*) → /api/main.py; /(.*) → /index.html. Migrations DEPLOY-TIME ONLY (migrate.yml → api/migrate.py, schema_migrations ledger); runtime init_tables() = connection check. CORS open. AI: zai-sdk; glm-4.7-flash default, glm-4.5-flash for /compress.
+
+## 2. MODULES
+main.py (routes/SSE/guards/models) · database.py (Database class + db singleton) · db_ext.py (additive: art, story fields/metadata, world state/events, stackables, memory) · core/auth.py (PBKDF2 100k, tokens 30d/12h) · core/prompt_assembler.py · core/state_resolver.py · core/state_applier.py · core/resilience.py (breaker 5×429→30s, backoff 0.8×2^n cap 8 jitter) · migrate.py · tests/.
+
+## 3. GUARDS
+require_user (all routes) · check_story_access (foreign/private 403; legacy bypass) · require_story_owner (notes/visibility) · db_ext.can_manage_story (owner OR legacy-claim: PATCH story, art routes) · require_own_playthrough · ensure_playthrough · _resolve_player_char · _recent_duplicate (90s) · _valid_data_url (data:image ≤900KB).
+
+## 4. MODELS
+ChatRequest · StoryContinueRequest · StoryCreateRequest{title,genre,premise,characterName/Role/Background,isPublic,coverImage,bannerImage,characterImage,starterLocation,tone} · StoryUpdateRequest{title,genre,premise,coverImage,bannerImage,isPublic,starterLocation,tone,characterId,characterName,characterRole,characterBackground,characterImage} · AuthRequest · ItemActionRequest · NoteCreateRequest · VisibilityRequest · ArtUpdateRequest{image,banner,kind,data_url} · CharArtRequest{data_url} · CharacterUpdateRequest{name,role,background}.
+
+## 5. ROUTE TABLE (guard · db calls · tables · caller)
+GET /health · SELECT 1 · App
+POST /auth/signup|login|logout · GET /auth/me · users, auth_tokens · AuthPage/App
+GET /stories?scope · list_all_stories / list_stories_for_user (creator_id+creator_name+played_count) · StoryLibrary
+GET /stories/art (BEFORE /stories/{id}) · db_ext.get_all_story_art · StoryLibrary
+GET /art/stories?ids= · filtered art map · art.js
+GET /playthroughs · list_playthroughs_for_user · StoryLibrary History
+GET /playthroughs/{id}/messages|map · O · App/StoryMap/syncQueue
+GET /playthroughs/{id}/inventory · O · dedupe_stackables → ensure → list items/equipment/backpacks + bonuses + abilities · InventoryPanel/syncQueue
+GET /playthroughs/{id}/world-nodes|world-events · O · db_ext · WorldCodex/syncQueue
+POST /playthroughs/{id}/compress · O · >50 msgs → Pulse summarize → set_memory_summary · syncQueue
+POST /playthroughs/{id}/equip|unequip|use|drop · O · db item methods · HUD_ACTION
+POST /playthroughs/{id}/complete · O · complete_playthrough · App
+GET /stories/{id} · U+S · get_story + get_story_characters + image merge via get_cast_with_images · StoryDetails/art.js
+GET /stories/{id}/cast · U+S · get_cast_with_images · art.js
+PATCH /stories/{id} · M · update_story_fields + set_story_visibility + set_story_metadata_keys + update_story_character + set_character_image_by_id · StoryCreator edit
+PATCH /stories/{id}/characters/{cid} · M · update_story_character · (direct clients)
+POST /stories/{id}/art · M · set_story_art/set_story_banner; accepts {image,banner} AND {kind,data_url} · StoryLibrary/art.js
+POST /stories/{id}/characters/{cid}/art · M · set_character_image_by_id · art.js
+GET/POST/DELETE /stories/{id}/notes… · S/W · story_notes · (no current UI caller)
+POST /stories/{id}/visibility · W · set_story_visibility · (no current UI caller)
+POST /stories/{id}/play · U+S · ensure_playthrough + ensure_playthrough_inventory · App
+POST /stories · U · create_story(meta starter_location/tone) + add_story_character(stats Health/MaxHealth 100, Mana/MaxMana 50) + intro 'legacy' msg + art setters · StoryCreator
+POST /stories/{id}/continue · U+S · pipeline §6 · streamStory
+POST /chat/stream · optional U · ensure_session/add_message · streamChat
+
+## 6. STORY TURN PIPELINE
+auth+access → ensure_playthrough → dedupe user msg → PromptAssembler → ZAI stream (call_with_retry 3) → SSE thinking/content → resolve_state → apply_state_updates → save narration → SSE state_update{clean_content, applied, rejected, day, time_of_day, status} → done. Errors: SSE error{code,retry_after,message}.
+
+## 7. TAG PROTOCOL & BEHAVIOR
+Resolver: TIME, STAT(=±N or space form ⇒ is_delta), LOCATION(desc), ITEM ±(attrs incl bonus./desc), ABILITY ±, BAG, WORLD_STATE_UPDATE(kind/parent/status/relationship/power/wealth/is_alive/allegiance/desc), WORLD_EVENT(type/desc), SAGA_END.
+Applier: STAT delta adds to current, clamp 0..999 (backend) — frontend clamps to MaxHealth/MaxMana (see FRONTEND §5, D-5); LOCATION upsert + ensure_world_node(settlement); ITEM stackables bump qty else grant w/ capacity; WORLD_STATE upsert w/ parent auto-create + clamps (rel ±100, power 0..100, wealth ≤9,999,999); WORLD_EVENT ledger w/ current day; SAGA_END completes.
+PromptAssembler order: SYSTEM+tags+rules(living world/agency/style) → WORLD STATE(+tone/starter from story metadata via §5 GET) → LOCAL ENVIRONMENT(node+children) → WORLD CODEX(≤30) → RECENT EVENTS(≤8) → characters(stats/abilities/carried/equipped/backpack) → known locations → MEMORY(summary/lorebook/recent/nudge) → DIRECTOR'S NOTES → ACTION.
+
+## 8. DB METHOD INDEX (database.py)
+auth/users · quick chat · stories(create/list/get/characters/messages/visibility) · notes CRUD · playthroughs(get/create/complete/list/messages) · state(time/location upsert/stat/ability/inventory mirror) · inventory(ensure/list/capacity/grant/consume/use/drop/equip/unequip/bonuses/backpack level) · legacy story-scoped · Phase6(get_full_playthrough_state, get_recent_messages_for_context, get_memory_summary, get_lorebook, get_and_clear_nudge) · Phase7(get_world_nodes, bulk_insert_world_nodes, get_node_context_for_location).
+
+## 9. DB_EXT INDEX
+set_story_art · set_story_banner · get_all_story_art · set_character_image · set_character_image_by_id · get_cast_with_images(id,name,role,background,is_player,image) · update_story_character · set_story_metadata_keys · can_manage_story · update_story_fields · find_stackable_item · bump_item_quantity · dedupe_stackables · get_world_nodes_full · ensure_world_node · update_world_node_state · record_world_event · get_recent_world_events · set_memory_summary.
+
+## 10. DISCREPANCY LEDGER
+- B-1/A-1 art.js endpoints — RESOLVED.
+- B-2 memory/lore/nudge columns dormant (code uses metadata JSONB) — OPEN (D-1).
+- B-4 notes/visibility routes have no UI caller — OPEN.
+- B-5 no per-user rate limit; CORS open — OPEN.
+- B-6 0008_story_indexes.sql absent from repo — OPEN.
+- D-5 backend stat clamp 0..999 vs frontend clampStat to Max* — ACCEPTED (AI prompt states caps; frontend enforces display).
+
+## 11. MAINTENANCE RULES
+New route → §5 row + FRONTEND §6. New db method → §8/§9 + DATABASE §4. New tag → §7 + resolver/applier + assembler + FRONTEND §5. New column → DATABASE §3 + numbered migration.
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+New model: StoryCommentRequest{content}. App version 7.6.0.
+New routes (all require_user):
+| Route | Guard | db_ext call | Caller |
+|---|---|---|---|
+| GET /api/stories/social (BEFORE /stories/{id}) | U | get_all_story_social_counts | StoryLibrary |
+| GET /api/stories/{id}/social | U + check_story_access | get_story_social(story_id, user_id) → {liked, like_count, comments} | StoryDetails |
+| POST /api/stories/{id}/like | U + check_story_access | toggle_story_like (toggle insert/delete; one like per user/story) | StoryDetails |
+| POST /api/stories/{id}/comments | U + check_story_access | add_story_comment (content 1–500; stores username snapshot) | StoryDetails |
+| DELETE /api/stories/{id}/comments/{cid} | U | delete_story_comment (comment author OR story author incl. legacy-claim) | StoryDetails |
+| DELETE /api/stories/{id} | U + can_manage_story | delete_story_full (FK CASCADE wipes characters/messages/notes/playthroughs/likes/comments) | StoryDetails |
+Guards unchanged otherwise. SSE pipeline unchanged.
+
+=====FILE: DATABASE_MASTER.md=====
+# DATABASE MASTER CONTRACT — InkMind (PostgreSQL)
+> Verified vs migrations 0001–0013. APPEND-ONLY. Schema change = new numbered
+> migration (IF NOT EXISTS) + §3 row + §4 matrix + BACKEND notes. Never runtime DDL.
+> IDs VARCHAR(36) · JSONB for AI-invented data · every INSERT fills every column ·
+> per-user isolation on all reads/writes.
+
+## 1. RELATIONS
+users 1-N auth_tokens|playthroughs|stories(creator)|chat_sessions 1-N chat_messages
+stories 1-N story_characters|story_messages('legacy')|story_notes|playthroughs
+playthroughs 1-N playthrough_characters|locations|story_messages|world_nodes|world_events
+playthrough_characters 1-N playthrough_items|playthrough_equipment ; 1-1 playthrough_backpacks
+playthrough_items 1-N playthrough_equipment (UNIQUE(character_id,slot))
+world_nodes self-ref parent_id (settlement→building→npc)
+
+## 2. TABLES (key columns)
+users(id, username UNIQ, password_hash, role, metadata, created) + seeded legacy-system
+auth_tokens(token PK, user_id FK, expires_at)
+chat_sessions(id, title, user_id def legacy) · chat_messages(id SERIAL, session_id FK, role CHECK, content, user_id, metadata)
+stories(id, title, genre def Unknown, premise, current_day≥1, time_of_day, creator_id def legacy, is_premium, energy_cost, is_public def TRUE(0007), cover_image/banner_image def ''(0011_story_art), metadata JSONB)
+story_characters(id, story_id FK, name, role, background, is_player, image def ''(0011_story_art), metadata)
+story_messages(id SERIAL, story_id FK, role CHECK, content, message_type, metadata, playthrough_id def 'legacy'(0002))
+story_notes(id SERIAL, story_id FK, content, priority, is_active)
+playthroughs(id, story_id FK, user_id FK, current_day, time_of_day, status CHECK(active|completed|abandoned|paused), metadata(current_location/memory_summary/lorebook/active_nudge), + dormant columns memory_summary/lorebook/active_nudge(0011_memory_and_lore))
+playthrough_characters(id, playthrough_id FK, character_name, role, background, is_player, metadata)
+locations(id, playthrough_id FK, name, description, is_discovered, visit_count, last_visited_at, metadata; UNIQUE(playthrough_id, LOWER(name)))
+playthrough_items(id, playthrough_id FK, character_id FK, name, item_type CHECK, slot CHECK, rarity CHECK, item_level 1..99, weight 0..99, quantity 1..99, metadata)
+playthrough_equipment(id, playthrough_id FK, character_id FK, item_id FK, slot; UNIQUE(character_id,slot))
+playthrough_backpacks(id, playthrough_id FK, character_id FK UNIQUE, level 1..20, metadata)
+world_nodes(id, playthrough_id FK, parent_id self-FK, node_type CHECK(region|faction|settlement|location|npc|item|economy_state), name, metadata, status def stable, is_alive, relationship def 0, wealth def 0, power def 50, allegiance def '', last_state_change_at; UNIQUE(playthrough_id,node_type,LOWER(name)))
+world_events(id, playthrough_id FK, node_id def '', node_name def '', event_type def 'event', description def '', day def 1)
+schema_migrations(filename PK, applied_at)
+
+## 3. TRIGGERS & CONSTRAINTS
+set_updated_at() triggers on stories, playthroughs, locations, chat_sessions, playthrough_items, playthrough_backpacks. CHECKs as listed above.
+
+## 4. METHOD → TABLE MATRIX
+database.py: auth→users/auth_tokens · chat→chat_* · stories→stories(+users join)/story_characters/story_messages · notes→story_notes · playthroughs→playthroughs/playthrough_characters/story_messages · locations→locations(+playthroughs.metadata) · char state→playthrough_characters.metadata · inventory→playthrough_items/equipment/backpacks · phase6→story_messages/playthroughs.metadata · phase7→world_nodes.
+db_ext.py: art/fields/metadata→stories · character image/edit→story_characters · stackables→playthrough_items(+equipment cleanup) · world→world_nodes · events→world_events · memory→playthroughs.metadata.
+core/auth.py→auth_tokens JOIN users · migrate.py→schema_migrations + migrations/*.sql.
+
+## 5. MIGRATION LEDGER
+0001 core(+legacy seed) · 0002 playthroughs+playthrough_id+backfill · 0003 hardening · 0004 locations · 0005 robustness(indexes/CHECKs/triggers/uniq location) · 0006 items/equipment/backpacks · 0007 is_public · 0009 visit_count/last_visited_at · 0010 location upsert index · 0011_memory_and_lore(dormant) · 0011_story_art(cover/banner/image) · 0012 world_nodes · 0013 world state columns + world_events. (0008 absent; two 0011s apply — ledger tracks filenames.)
+
+## 6. BUSINESS INVARIANTS
+Backpack capacity 5+5×level; equipped weigh nothing; quest undroppable; stackables must stack (grant stacks, applier bumps, dedupe self-heals); world names unique per (pt,type,lower); descriptions fill-only-when-empty; LOCATION_UPDATE registers settlement node; legacy rows never leak (base_only + per-playthrough seeding); stat clamps backend 0..999 / frontend 0..Max*(D-5).
+
+## 7. DISCREPANCY LEDGER
+- D-1 memory columns dormant vs metadata JSONB — OPEN.
+- D-2 0008 missing — OPEN.
+- D-3 world_nodes unique incl node_type vs name-only upsert in update_world_node_state — ACCEPTED.
+- D-4 quick-chat UI localStorage-only — OPEN.
+- D-5 dual stat clamps — ACCEPTED.
+
+## 8. MAINTENANCE RULES
+New table → §2 + §1 + §4 rows. New JSONB key → note under table. Never drop/rename columns without user-approved plan.
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+Migration 0014_social.sql (deploy-time):
+- story_likes(story_id FK CASCADE, user_id FK CASCADE, created_at; PK(story_id,user_id)) — one like per user per story; idx(story_id).
+- story_comments(id SERIAL PK, story_id FK CASCADE, user_id FK CASCADE, username VARCHAR(80) DEFAULT 'Adventurer' (snapshot), content TEXT DEFAULT '', created_at) — idx(story_id, created_at DESC).
+Relations: stories 1-N story_likes | story_comments.
+Method → table additions (api/db_ext.py): toggle_story_like / get_story_social / get_all_story_social_counts → story_likes+story_comments · add_story_comment / delete_story_comment → story_comments · delete_story_full → stories (cascade).
+Invariants: deleting a story cascades ALL related rows (characters, messages, notes, playthroughs, likes, comments); comment deletion allowed for comment author or story author (legacy-claim included); username is denormalized on comments so display survives user changes.
 
 =====FILE: DEPLOYMENT.md=====
 # Deployment Guide
@@ -377,6 +523,71 @@ ALLOWED_ORIGINS=https://yourusername.github.io
 ### Build fails on Vercel — "Cannot find module"
 - Make sure the **Root Directory** in Vercel project settings is `frontend`, not the repo root.
 
+=====FILE: FRONTEND_MASTER.md=====
+# FRONTEND MASTER CONTRACT — InkMind
+> Verified vs commit f32ebcc + "comprehensive forge + masters" commit. APPEND-ONLY:
+> never remove entries or restructure until the user explicitly orders a refactor.
+> Update the matching entry in the same commit as any code change.
+
+## 1. STACK & BUILD
+React 19.2.8 · Vite 8.1.5 · Tailwind 3.4.17 · lucide-react · react-markdown+gfm · idb 8.0.1.
+Entry index.html → main.jsx (StrictMode) → App.jsx. BASE_URL (utils/auth.js): VITE_API_URL (+"/api") or same-origin "/api". Dev proxy /api → localhost:8000. Dark theme, 44px targets, 100dvh.
+
+## 2. VIEW STATE MACHINE (App.jsx)
+landing → auth (requireAuth) · library → details (handleOpenStory) · storySetup → StoryCreator(create) · storyEdit → StoryCreator(edit) · default = chat layout (Sidebar+header+HUD+ChatWindow+ChatInput).
+
+## 3. PAGES & ELEMENTS → BACKEND CALLS
+- LandingPage: Quick Chat card → requireAuth("chat"); Story Forge card ("Under Development" badge, cosmetic) → requireAuth("story"); Sign In/Sign out.
+- AuthPage: POST /api/auth/login|signup (15s timeout; one auto-retry on abort/Failed-to-fetch; signup 409-after-retry → auto login); remember_me → localStorage vs sessionStorage via saveAuth.
+- StoryLibrary: tabs All/Mine/History. Loads GET /api/stories?scope=all|mine + GET /api/playthroughs + GET /api/stories/art (map {id:{cover,banner}} flattened). Cards: cover img, genre chip, owner-only Art upload (canvas 640px → POST /api/stories/{id}/art {image}), "by {creator_name}", Played/New/Day. Card click → onOpenStory(full payload: id, creator_id/name, is_public, played_count, ...).
+- StoryDetails: ALWAYS fetches GET /api/stories/{id} (card payloads lack image columns). Renders banner (banner_image||cover_image), genre/public/private chips, starter_location chip, tone line, premise, cast cards WITH portraits (c.image), Continue/Begin Journey → POST via handleStartJourney, author-only Edit → storyEdit.
+- StoryCreator: 3 steps. 1) World: title, genre (9), premise, starterLocation, tone, Public/Private toggle, cover+banner ImageFields (utils/art.js fileToDataUrl). 2) Protagonist: name/role/background/portrait; edit mode allows character edits (note: new journeys only). 3) Review + Save. Create → POST /api/stories (full payload). Edit → PATCH /api/stories/{id} (full payload via App.handleUpdateStory passthrough).
+- Chat layout: header (Home, title/Day, Flag end-journey double-tap → POST /playthroughs/{pt}/complete, Settings), error/notice banners, completed banner, HUD, ChatWindow, ChatInput.
+- HUD: HP bar Health/MaxHealth, MP bar Mana/MaxMana (defaults 100/50), stat chips, location chip → StoryMap; buttons: WorldCodex, CharacterSheet, StoryMap, InventoryPanel(count).
+- InventoryPanel: fetchInventory (cache-first); Abilities / Equipped (Unequip) / Carried (name ×qty, Equip/Use/Drop) via optimistic api helpers + HUD_ACTION.
+- StoryMap: fetchMap; journey line + detail (description, visits, discovered, last visited).
+- CharacterSheet: stats (+gear bonuses), abilities, equipped.
+- WorldCodex: GET world-nodes + world-events; groups powers/places/people; status tone chips; chronicle.
+
+## 4. UTILS
+api.js: runStream (SSE; 429 retry once w/ Retry-After clamp 1–10s; synthetic done on silent EOF), streamChat/streamStory, fetchInventory/fetchMap (IndexedDB-first + SYNC_HUD), equip/unequip/use/drop (optimistic + HUD_ACTION), completePlaythrough, compressMemory.
+auth.js: BASE_URL, token storage, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry, fetchMe, postAuth.
+telemetry.js: device/geo payload (ipwho.is, silent-fail).
+storage.js: localStorage quick-chat sessions (glm_chat_data) + settings (glm_chat_settings).
+models.js: glm-4.7-flash="InkMind Nova", glm-4.5-flash="InkMind Pulse" (ids never shown).
+localDb.js: IndexedDB inkmind_local v3 — user_session, stories, playthroughs, messages(idx session_id/playthrough_id), library_feed, hud_cache(idx playthrough_id), world_nodes(idx playthrough_id/parent_id); clearLocalDB on logout.
+hudStore.js: cache getters/setters, optimisticItemAction, applyStateUpdateToCache, getCachedStoryContext.
+syncQueue.js: FIFO + signature dedupe + offline pause + requestIdleCallback. Processors: SYNC_LIBRARY, FETCH_STORY_DETAILS, FETCH_PLAYTHROUGH, FETCH_MESSAGES, COMPRESS_MEMORY, SYNC_HUD(inventory|map), HUD_ACTION, SYNC_WORLD_NODES. NEVER imports api.js.
+art.js: fetchStoriesArt, fetchCast, fetchPrologue, uploadStoryArt{kind,data_url}, uploadCharacterArt{data_url}, fileToDataUrl(640px, q0.82, 8MB cap).
+
+## 5. SSE state_update HANDLING (App.jsx)
+clean_content → bubble; rejected → notice; LOCATION_UPDATE → current_location; STAT_UPDATE → delta-additive + clampStat (Health 0..MaxHealth, Mana 0..MaxMana, Max* 1..999, others 0..999) — FE-BUG-1 RESOLVED; ITEM_UPDATE → inventory mirror; ABILITY_UPDATE → abilities mirror; then applyStateUpdateToCache + SYNC_HUD(inventory, world); done → COMPRESS_MEMORY.
+
+## 6. UI → BACKEND INDEX
+Boot GET /health + /auth/me · auth POST /auth/* · library GET /stories, /playthroughs, /stories/art · details GET /stories/{id} · create POST /stories · edit PATCH /stories/{id} (+ PATCH /stories/{id}/characters/{cid}, POST .../art, POST .../characters/{cid}/art available) · journey POST /stories/{id}/play · turn POST /stories/{id}/continue · HUD GET inventory|map|world-nodes|world-events · actions POST equip|unequip|use|drop|complete|compress · chat POST /chat/stream · art.js GET /art/stories, /stories/{id}/cast.
+
+## 7. DISCREPANCY LEDGER (append-only; mark RESOLVED, never delete)
+- FE-BUG-1 HUD -10/100 on damage — RESOLVED (clampStat + delta-additive).
+- FE-BUG-2 SYNC_HUD key 'world' enqueued but processor has no 'world' branch (no-op; WorldCodex fetches fresh on open) — OPEN.
+- A-3/B-1 art.js endpoints missing — RESOLVED (all routes exist).
+- DOC-1 README.md still describes legacy GLM Chat /sessions — OPEN.
+- A-4 LandingPage "Under Development" badge stale — OPEN (cosmetic).
+
+## 8. MAINTENANCE RULES
+New component → §3 entry + §6 for its calls. New util → §4. New IndexedDB store → bump DB_VERSION + §4. Any backend call here must exist in BACKEND_MASTER §5 first.
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+- StoryDetails.jsx (v2): like button (toggle + count, pink when liked) via POST /api/stories/{id}/like; Reader Comments section (list newest-first, input+send, delete own comments) via GET/POST/DELETE .../social, .../comments; cast cards are now TAP-TO-EXPAND (full background on tap, "Read more ▾" hint); author-only DELETE button in header (double-tap confirm → DELETE /api/stories/{id} → back to library). Full premise + backgrounds + tone + starter-location chips remain.
+- StoryLibrary.jsx (v2): 5th parallel fetch GET /api/stories/social → {story_id: {likes, comments}}; cards show ♥ likes and 💬 comments counts when > 0.
+- App.jsx contract UNCHANGED (StoryDetails props: story, user, onBack, onStartJourney, onEdit).
+- UX rules kept: 44px targets, touch-manipulation, confirm-before-destructive (same pattern as end-journey flag).
+
+## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
+- StoryDetails.jsx (v2): like button (toggle + count, pink when liked) via POST /api/stories/{id}/like; Reader Comments section (list newest-first, input+send, delete own comments) via GET/POST/DELETE .../social, .../comments; cast cards are now TAP-TO-EXPAND (full background on tap, "Read more ▾" hint); author-only DELETE button in header (double-tap confirm → DELETE /api/stories/{id} → back to library). Full premise + backgrounds + tone + starter-location chips remain.
+- StoryLibrary.jsx (v2): 5th parallel fetch GET /api/stories/social → {story_id: {likes, comments}}; cards show ♥ likes and 💬 comments counts when > 0.
+- App.jsx contract UNCHANGED (StoryDetails props: story, user, onBack, onStartJourney, onEdit).
+- UX rules kept: 44px targets, touch-manipulation, confirm-before-destructive (same pattern as end-journey flag).
+
 =====FILE: INKMIND_MASTER_CONTEXT.md=====
 # INKMIND — MASTER CONTEXT & PROJECT HISTORY
 > Living document. Every commit that changes code MUST append an entry to section 9 (Rule 12).
@@ -568,6 +779,41 @@ narrated effect; N+1 queries in prompt assembly (perf note); no library search/f
 - 2026-08-11 Critical hotfix deployment: stat_resolver now treats "= -10" as delta (line 104), state_applier handles WORLD_STATE_UPDATE + WORLD_EVENT + stackable dedupe + ensure_world_node on LOCATION_UPDATE, db_ext gains banner editing + legacy claim + inventory dedupe + parent_id hierarchy, main.py gains PATCH /stories/{id} + banner field + dedupe_stackables call. Fixes: health no longer jumps to -10/100, coins stack instead of duplicate, world entities persist with hierarchy, banner editing works for all stories.
 
 - 2026-08-11 Detail review flow: new StoryDetails.jsx (banner, author, premise, cast, Continue/New Journey, author-only Edit); App.jsx now routes library clicks to details view before chat, handleStartJourney wraps the playthrough+chat setup; StoryLibrary passes creator_id/creator_name/played_count/is_public in card payloads; database.list_stories_for_user now returns creator_id + creator_name so My Creations tab shows author reliably.
+
+## 0.5 MASTER REFERENCE FILES (READ THESE TOO — mandatory)
+Before ANY task, read these three contracts in addition to this file:
+- FRONTEND_MASTER.md — every page/element and the exact backend call it makes
+- BACKEND_MASTER.md — every route, its db methods, tables, and frontend caller
+- DATABASE_MASTER.md — every table and the method→table matrix
+RULE: these files are append-only. Never remove entries or restructure them unless the user
+explicitly orders a refactor. When you add code, update the matching contract in the same commit.
+
+- 2026-08-13 Contracts sprint (verified vs commit f32ebcc): created three append-only master contracts — FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md. Discrepancy ledgers added: FE-BUG-1 (App.jsx STAT_UPDATE still assigns raw value → HUD -10/100; backend already fixed), FE-BUG-2 (SYNC_HUD key 'world' no-op), A-3/B-1 (utils/art.js targets endpoints that don't exist), B-2/D-1 (memory columns dormant vs metadata JSONB), B-4 (notes/visibility routes have no UI caller), B-6/D-2 (0008_story_indexes.sql missing from repo). All future sessions must read the three masters before coding and update them with every change.
+
+## 0.5 MASTER REFERENCE FILES (READ THESE TOO — mandatory)
+Before ANY task, read these three contracts in addition to this file:
+- FRONTEND_MASTER.md — every page/element, stat clamp system, and the exact backend call each action makes
+- BACKEND_MASTER.md — every route, its guard, db methods, tables, and frontend caller
+- DATABASE_MASTER.md — every table, the method→table matrix, migration ledger, and invariants
+RULE: these files are append-only. Never remove entries or restructure them unless the
+user explicitly orders a refactor. When you add code, update the matching contract(s) in
+the same commit. Discrepancy ledgers are historical truth — mark entries RESOLVED, never delete.
+
+- 2026-08-13 FE-BUG-1 + A-3/B-1 sprint: App.jsx applies STAT deltas additively + clampStat (Health 0..MaxHealth baseline 100, Mana 0..MaxMana baseline 50 — level-system ready); state_applier._stat_cap enforces the same caps server-side; new characters seeded with MaxHealth=100/MaxMana=50; prompt teaches caps + delta-only damage. A-3/B-1 resolved: implemented GET /api/art/stories?ids=, GET /api/stories/{id}/cast, POST /api/stories/{id}/characters/{cid}/art, extended ArtUpdateRequest to accept {kind,data_url}; GET /api/stories/{id} now merges cast portraits; db_ext gains set_character_image_by_id. Created FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md (append-only contracts) + this §0.5 pointer.
+
+- 2026-08-13 Comprehensive Story Forge sprint: StoryCreator rewritten as 3-step forge (World: title/9 genres/premise/starter location/tone/public-private/cover/banner → Protagonist: name/role/background/portrait, editable in Edit mode → Review). Backend: POST /stories + PATCH /stories/{id} accept all new fields (starter_location/tone stored in stories.metadata; tone + starting region injected by PromptAssembler; starter location seeds locations+world_nodes on first play); new PATCH /stories/{id}/characters/{cid}; GET /stories/{id} merges cast portraits; art.js endpoints live (/art/stories, /cast, characters/{cid}/art, {kind,data_url} accepted). FE-BUG-1 RESOLVED in App.jsx (delta stats + clampStat HP 0..MaxHealth, MP 0..MaxMana, level-ready). DB unchanged (metadata JSONB carries new keys — additive, no migration needed).
+
+- 2026-08-13 Comprehensive Story Forge sprint (re-applied — verified missing from f32ebcc): StoryCreator is now a 3-step forge (World: title/9 genres/premise/starter location/tone/public-private/cover+banner upload → Protagonist: name/role/background/portrait, editable in Edit mode → Review). Backend: POST /stories + PATCH /stories/{id} accept all new fields (starter_location/tone in stories.metadata); new GET /art/stories, GET /stories/{id}/cast, PATCH /stories/{id}/characters/{cid}, POST /stories/{id}/characters/{cid}/art; GET /stories/{id} merges cast portraits; starter location seeds locations+world_nodes+current_location on first play; new characters seed MaxHealth=100/MaxMana=50. FE-BUG-1 resolved in App.jsx (delta stats + clampStat HP 0..MaxHealth, MP 0..MaxMana). db_ext gains set_character_image_by_id / update_story_character / set_story_metadata_keys. No schema change (metadata JSONB + existing columns).
+
+## 0.5 MASTER REFERENCE FILES (READ THESE TOO — mandatory)
+Before ANY task read FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md in
+addition to this file. They are append-only contracts: never remove entries or
+restructure until the user explicitly orders a refactor; update them in the same
+commit as any code change.
+
+- 2026-08-13 Comprehensive forge + masters sprint: StoryDetails ALWAYS fetches full story (banner/cover/cast portraits now render; starter-location + tone chips); get_story_detail merges character images; comprehensive 3-step StoryCreator (images, visibility, starter location, tone, portrait; full edit); App.jsx edit passthrough + FE-BUG-1 clampStat fix; backend accepts full create/update payloads + art.js routes (/art/stories, /cast, characters/{cid}/art, PATCH characters); new chars seed MaxHealth/MaxMana; created FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md + this §0.5 pointer.
+
+- 2026-08-17 Social & Delete sprint: migration 0014 (story_likes + story_comments); backend routes GET /stories/social, GET/POST /stories/{id}/social & /comments, DELETE comment, POST /stories/{id}/like toggle, DELETE /stories/{id} (author-only, cascade); StoryDetails gains like button, comments (post/delete), tap-to-expand cast backgrounds, author Delete (double-tap confirm); StoryLibrary cards show like/comment counts; master files updated via append-only addenda.
 
 =====FILE: LICENSE=====
                                  Apache License
@@ -976,13 +1222,13 @@ class PromptAssembler:
         all_items = state["items"]
         all_equipment = state["equipment"]
         all_backpacks = state["backpacks"]
-
+        
         # PHASE 6: Dynamic Context Fetching
         messages = db.get_recent_messages_for_context(self.playthrough_id, self.max_chars)
         memory = db.get_memory_summary(self.playthrough_id)
         lore = db.get_lorebook(self.playthrough_id)
         nudge = db.get_and_clear_nudge(self.playthrough_id)
-
+        
         notes = db.get_story_notes(story["id"], active_only=True)
 
         system = f"""[SYSTEM INSTRUCTIONS]
@@ -1005,7 +1251,9 @@ Rarities: common, uncommon, rare, epic, legendary.
 
 [STATE TAG RULES - CRITICAL]
 - Physical objects -> ITEM_UPDATE. Powers/skills/soul rings/knowledge -> ABILITY_UPDATE (never in backpack).
-- ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise on your first response.
+- Health stays between 0 and MaxHealth (starts at 100); Mana stays between 0 and MaxMana (starts at 50). Never set them outside these bounds.
+- Damage, healing, and mana costs MUST use the delta form, e.g. [STAT_UPDATE: Hero.Health -10] or [STAT_UPDATE: Hero.Mana +5]. Use "= value" only for true absolute fixes.
+- ALWAYS emit [LOCATION_UPDATE] (with desc=) when a location is first described, when the party moves, or when the player asks where they are. If no Current Location is set, infer it from the premise or Starting Region on your first response.
 - Always include short desc= for new items, abilities and locations.
 - Respect remaining backpack capacity — do not grant loot that won't fit.
 
@@ -1035,6 +1283,11 @@ Time of Day: {pt['time_of_day']}
         meta = pt.get("metadata") or {}
         if meta.get("current_location"):
             world += f"Current Location: {meta['current_location']}\n"
+        story_meta = story.get("metadata") or {}
+        if story_meta.get("tone"):
+            world += f"Tone & Style Direction: {story_meta['tone']}\n"
+        if story_meta.get("starter_location") and not meta.get("current_location"):
+            world += f"Starting Region: {story_meta['starter_location']}\n"
 
         # PHASE 7: Procedural World Expansion Context
         loc_name = meta.get("current_location")
@@ -1051,7 +1304,7 @@ Time of Day: {pt['time_of_day']}
                     world += f"Economy: {node_meta['economy']}\n"
                 if node_meta.get("politics"):
                     world += f"Politics/Factions: {node_meta['politics']}\n"
-
+                
                 if children:
                     world += "Local Entities:\n"
                     for child in children:
@@ -1096,7 +1349,7 @@ Time of Day: {pt['time_of_day']}
             char_items = [i for i in all_items if i["character_id"] == c["id"]]
             char_equip_ids = {e["item_id"] for e in all_equipment if e["character_id"] == c["id"]}
             carried = [i for i in char_items if i["id"] not in char_equip_ids]
-
+            
             if carried:
                 world += "  Carried: " + ", ".join(
                     f"{i['name']} ×{i['quantity']}" if i["quantity"] > 1 else i["name"] for i in carried) + "\n"
@@ -1118,7 +1371,7 @@ Time of Day: {pt['time_of_day']}
         context = "\n[STORY MEMORY & RECENT EVENTS]\n"
         if memory:
             context += f"[PREVIOUS CHAPTERS SUMMARY]\n{memory}\n\n"
-
+            
         if lore:
             context += "[WORLD LOREBOOK]\n"
             for entry in lore[-15:]: # Keep last 15 entries in context
@@ -1128,7 +1381,7 @@ Time of Day: {pt['time_of_day']}
         for m in messages:
             role = "Player" if m["role"] == "user" else "Narrator"
             context += f"{role}: {m['content']}\n"
-
+            
         if nudge:
             context += f"\n{ nudge }\n"
 
@@ -1273,6 +1526,16 @@ logger = logging.getLogger(__name__)
 
 STACKABLE_TYPES = {"consumable", "material"}
 
+def _stat_cap(stat_name, current_stats):
+    """Level-ready caps: Health follows MaxHealth (baseline 100), Mana follows
+    MaxMana (baseline 50). The future level system raises MaxHealth/MaxMana and
+    these caps follow automatically."""
+    if stat_name == "Health":
+        return float(current_stats.get("MaxHealth", 100) or 100)
+    if stat_name == "Mana":
+        return float(current_stats.get("MaxMana", 50) or 50)
+    return 999.0
+
 def apply_state_updates(playthrough_id: str, updates: list) -> dict:
     applied = []
     rejected = []
@@ -1287,18 +1550,20 @@ def apply_state_updates(playthrough_id: str, updates: list) -> dict:
                 char_name = update["character"]
                 stat_name = update["stat"]
                 new_value = update["value"]
+                # Load current stats once: needed for deltas AND for level-ready caps.
+                current_stats = {}
+                chars = db.get_playthrough_characters(playthrough_id)
+                for c in chars:
+                    if c["character_name"].lower() == char_name.lower():
+                        current_stats = (c.get("metadata") or {}).get("stats", {}) or {}
+                        break
                 # CRITICAL: Always treat as delta if is_delta is True
                 if update.get("is_delta", False):
-                    chars = db.get_playthrough_characters(playthrough_id)
-                    current = None
-                    for c in chars:
-                        if c["character_name"].lower() == char_name.lower():
-                            meta = c.get("metadata") or {}
-                            current = (meta.get("stats", {})).get(stat_name, 100)
-                            break
-                    if current is not None:
-                        new_value = float(current) + float(new_value)
-                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=999):
+                    fallback = 100 if stat_name == "Health" else 50 if stat_name == "Mana" else 0
+                    current = current_stats.get(stat_name, fallback)
+                    new_value = float(current) + float(new_value)
+                cap = _stat_cap(stat_name, current_stats)
+                if db.update_playthrough_character_stat(playthrough_id, char_name, stat_name, new_value, max_value=cap):
                     applied.append(update)
 
             elif utype == "LOCATION_UPDATE":
@@ -2518,7 +2783,7 @@ except Exception as e:
 
 =====FILE: api/db_ext.py=====
 """Phase 7B additive module: story art, story metadata edits, living-world state,
-world event ledger, inventory dedupe/stacking, memory summaries.
+world event ledger, inventory dedupe/stacking, memory summaries, social layer.
 Kept separate from database.py to stay purely additive (no rewrite risk)."""
 import json
 import uuid
@@ -2563,13 +2828,66 @@ def set_character_image(story_id, character_name, image):
         "UPDATE story_characters SET image = %s WHERE story_id = %s AND LOWER(name) = LOWER(%s)",
         (image or "", story_id, character_name), fetch="none", commit=True)
 
+def set_character_image_by_id(story_id, char_id, image):
+    try:
+        row = db.execute_query(
+            "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
+            (char_id, story_id), fetch="one")
+        if not row:
+            return False
+        db.execute_query(
+            "UPDATE story_characters SET image = %s WHERE id = %s",
+            (image or "", char_id), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"set_character_image_by_id failed: {e}")
+        return False
+
 def get_cast_with_images(story_id):
     return db.execute_query(
-        "SELECT id, name, role, image FROM story_characters WHERE story_id = %s "
+        "SELECT id, name, role, background, is_player, image FROM story_characters WHERE story_id = %s "
         "ORDER BY is_player DESC, created_at ASC", (story_id,), fetch="all") or []
 
+def update_story_character(story_id, char_id, fields):
+    try:
+        row = db.execute_query(
+            "SELECT id FROM story_characters WHERE id = %s AND story_id = %s",
+            (char_id, story_id), fetch="one")
+        if not row:
+            return False
+        allowed = {"name", "role", "background"}
+        sets, params = [], []
+        for k, v in (fields or {}).items():
+            if k in allowed and v is not None:
+                sets.append(f"{k} = %s"); params.append(str(v))
+        if not sets:
+            return True
+        params.append(char_id)
+        db.execute_query(f"UPDATE story_characters SET {', '.join(sets)} WHERE id = %s",
+                         tuple(params), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"update_story_character failed: {e}")
+        return False
+
+def set_story_metadata_keys(story_id, updates):
+    try:
+        def fn(cur):
+            cur.execute("SELECT metadata FROM stories WHERE id = %s", (story_id,))
+            row = cur.fetchone()
+            if not row: return False
+            meta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            for k, v in (updates or {}).items():
+                meta[k] = v
+            cur.execute("UPDATE stories SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(meta), story_id))
+            return True
+        return db._with_conn(fn, commit=True) is True
+    except Exception as e:
+        logger.error(f"set_story_metadata_keys failed: {e}")
+        return False
+
 def can_manage_story(story, user_id):
-    """Owner — or anyone may adopt a legacy (pre-auth) story."""
     owner = story.get("creator_id")
     return owner == user_id or owner in (None, "", LEGACY_USER_ID)
 
@@ -2586,6 +2904,87 @@ def update_story_fields(story_id, fields):
                      tuple(params), fetch="none", commit=True)
     return True
 
+def delete_story_full(story_id):
+    """FK ON DELETE CASCADE removes characters, messages, notes, playthroughs, likes, comments."""
+    try:
+        db.execute_query("DELETE FROM stories WHERE id = %s", (story_id,), fetch="none", commit=True)
+        return True
+    except Exception as e:
+        logger.error(f"delete_story_full failed: {e}")
+        return False
+
+# ── Social: Likes & Comments (0014) ──
+def toggle_story_like(story_id, user_id):
+    def fn(cur):
+        cur.execute("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+        exists = cur.fetchone()
+        if exists:
+            cur.execute("DELETE FROM story_likes WHERE story_id = %s AND user_id = %s", (story_id, user_id))
+            liked = False
+        else:
+            cur.execute("INSERT INTO story_likes (story_id, user_id, created_at) VALUES (%s, %s, CURRENT_TIMESTAMP)",
+                        (story_id, user_id))
+            liked = True
+        cur.execute("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,))
+        count = int(cur.fetchone()["c"])
+        return {"liked": liked, "like_count": count}
+    return db._with_conn(fn, commit=True) or {"liked": False, "like_count": 0}
+
+def get_story_social(story_id, user_id):
+    try:
+        likes = db.execute_query("SELECT COUNT(*) AS c FROM story_likes WHERE story_id = %s", (story_id,), fetch="one")
+        mine = db.execute_query("SELECT 1 AS x FROM story_likes WHERE story_id = %s AND user_id = %s",
+                                (story_id, user_id), fetch="one")
+        comments = db.execute_query(
+            "SELECT id, user_id, username, content, created_at FROM story_comments "
+            "WHERE story_id = %s ORDER BY created_at DESC LIMIT 50",
+            (story_id,), fetch="all") or []
+        return {"liked": mine is not None, "like_count": int(likes["c"]) if likes else 0, "comments": comments}
+    except Exception as e:
+        logger.error(f"get_story_social failed: {e}")
+        return {"liked": False, "like_count": 0, "comments": []}
+
+def add_story_comment(story_id, user_id, username, content):
+    try:
+        return db.execute_query(
+            "INSERT INTO story_comments (story_id, user_id, username, content, created_at) "
+            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING id, created_at",
+            (story_id, user_id, username or "Adventurer", content), fetch="one", commit=True)
+    except Exception as e:
+        logger.error(f"add_story_comment failed: {e}")
+        return None
+
+def delete_story_comment(comment_id, user_id, story_owner_id=None):
+    """Allowed for the comment author or the story author (legacy-claim included)."""
+    try:
+        def fn(cur):
+            cur.execute("SELECT user_id FROM story_comments WHERE id = %s", (comment_id,))
+            row = cur.fetchone()
+            if not row: return False
+            is_comment_author = row["user_id"] == user_id
+            is_story_owner = story_owner_id is not None and (story_owner_id == user_id or story_owner_id in (None, "", LEGACY_USER_ID))
+            if not (is_comment_author or is_story_owner): return False
+            cur.execute("DELETE FROM story_comments WHERE id = %s", (comment_id,))
+            return True
+        return db._with_conn(fn, commit=True) is True
+    except Exception as e:
+        logger.error(f"delete_story_comment failed: {e}")
+        return False
+
+def get_all_story_social_counts():
+    try:
+        likes = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_likes GROUP BY story_id", fetch="all") or []
+        comments = db.execute_query("SELECT story_id, COUNT(*) AS c FROM story_comments GROUP BY story_id", fetch="all") or []
+        out = {}
+        for r in likes:
+            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["likes"] = int(r["c"])
+        for r in comments:
+            out.setdefault(r["story_id"], {"likes": 0, "comments": 0})["comments"] = int(r["c"])
+        return out
+    except Exception as e:
+        logger.error(f"get_all_story_social_counts failed: {e}")
+        return {}
+
 # ── Inventory: stacking & self-healing dedupe ──
 def find_stackable_item(playthrough_id, character_id, name):
     return db.execute_query(
@@ -2601,7 +3000,6 @@ def bump_item_quantity(playthrough_id, item_id, qty=1):
     return True
 
 def dedupe_stackables(playthrough_id):
-    """Merge duplicate stackable rows (same character + name). Idempotent & cheap."""
     try:
         def fn(cur):
             cur.execute(
@@ -2645,7 +3043,6 @@ def get_world_nodes_full(playthrough_id):
         return db.get_world_nodes(playthrough_id)
 
 def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
-    """Create-if-missing so map/world stays persistent. Never overwrites state."""
     try:
         def fn(cur):
             cur.execute(
@@ -2674,7 +3071,6 @@ def ensure_world_node(playthrough_id, name, kind="settlement", description=""):
         return None
 
 def update_world_node_state(playthrough_id, node_name, updates):
-    """Upsert an entity and apply state changes. Signed values = deltas."""
     try:
         def fn(cur):
             cur.execute(
@@ -2682,8 +3078,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 "WHERE playthrough_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
                 (playthrough_id, node_name))
             row = cur.fetchone()
-
-            # Resolve optional parent (hierarchy: city -> building / npc)
             parent_id = None
             if updates.get("parent"):
                 pname = str(updates["parent"]).strip()
@@ -2701,7 +3095,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                         "VALUES (%s, %s, NULL, 'settlement', %s, '{}', 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                         (pid, playthrough_id, pname))
                     parent_id = pid
-
             created = False
             if not row:
                 kind = str(updates.get("kind", "")).lower()
@@ -2720,7 +3113,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                     (new_id, playthrough_id, parent_id, kind, node_name, json.dumps(meta)))
                 row = {"id": new_id, "parent_id": parent_id, "relationship": 0, "wealth": 0, "power": 50, "metadata": meta}
                 created = True
-
             sets, params = [], []
             if updates.get("status"):
                 sets.append("status = %s"); params.append(str(updates["status"])[:64])
@@ -2751,8 +3143,6 @@ def update_world_node_state(playthrough_id, node_name, updates):
                 sets.append("updated_at = CURRENT_TIMESTAMP")
                 params.append(row["id"])
                 cur.execute(f"UPDATE world_nodes SET {', '.join(sets)} WHERE id = %s", tuple(params))
-
-            # Fill description only when empty (first chronicle wins)
             if updates.get("description"):
                 cur.execute("SELECT metadata FROM world_nodes WHERE id = %s", (row["id"],))
                 mrow = cur.fetchone()
@@ -2840,7 +3230,7 @@ async def lifespan(app: FastAPI):
     except Exception as e: logger.error(f"DB Init Warning: {e}")
     yield
 
-app = FastAPI(title="InkMind API", version="7.3.0", lifespan=lifespan)
+app = FastAPI(title="InkMind API", version="7.6.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
@@ -2887,14 +3277,27 @@ class StoryCreateRequest(BaseModel):
     characterRole: str
     characterBackground: str
     isPublic: bool = True
+    coverImage: str = ""
+    bannerImage: str = ""
+    characterImage: str = ""
+    starterLocation: str = ""
+    tone: str = ""
     client_telemetry: Optional[dict] = None
 
 class StoryUpdateRequest(BaseModel):
     title: Optional[str] = None
     genre: Optional[str] = None
     premise: Optional[str] = None
-    cover_image: Optional[str] = None
-    banner_image: Optional[str] = None
+    coverImage: Optional[str] = None
+    bannerImage: Optional[str] = None
+    isPublic: Optional[bool] = None
+    starterLocation: Optional[str] = None
+    tone: Optional[str] = None
+    characterId: Optional[str] = None
+    characterName: Optional[str] = None
+    characterRole: Optional[str] = None
+    characterBackground: Optional[str] = None
+    characterImage: Optional[str] = None
 
 class AuthRequest(BaseModel):
     username: str
@@ -2916,6 +3319,19 @@ class VisibilityRequest(BaseModel):
 class ArtUpdateRequest(BaseModel):
     image: str = ""
     banner: str = ""
+    kind: str = ""
+    data_url: str = ""
+
+class CharArtRequest(BaseModel):
+    data_url: str = ""
+
+class CharacterUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    background: Optional[str] = None
+
+class StoryCommentRequest(BaseModel):
+    content: str
 
 router = APIRouter(prefix="/api")
 
@@ -2978,6 +3394,9 @@ def _recent_duplicate(last_row, content, window=90):
     except Exception:
         return False
 
+def _valid_data_url(s):
+    return isinstance(s, str) and s.startswith("data:image") and len(s) <= 900_000
+
 @router.get("/health")
 def health(): return {"status": "ok", "db_enabled": db.database_url is not None}
 
@@ -3030,11 +3449,16 @@ def list_stories(raw: Request, scope: str = "all"):
         return db.list_stories_for_user(user["id"])
     return db.list_all_stories(user["id"])
 
-# NOTE: declared BEFORE /stories/{story_id} so "art" is not captured as a story id.
+# NOTE: declared BEFORE /stories/{story_id} so literals are not captured as a story id.
 @router.get("/stories/art")
 def stories_art(raw: Request):
     user = require_user(raw)
     return db_ext.get_all_story_art()
+
+@router.get("/stories/social")
+def stories_social(raw: Request):
+    user = require_user(raw)
+    return db_ext.get_all_story_social_counts()
 
 @router.get("/playthroughs")
 def list_playthroughs(raw: Request):
@@ -3061,7 +3485,7 @@ def get_map(playthrough_id: str, raw: Request):
 def get_inventory(playthrough_id: str, raw: Request):
     user = require_user(raw)
     require_own_playthrough(playthrough_id, user)
-    db_ext.dedupe_stackables(playthrough_id)  # self-healing: merge duplicate coins/materials
+    db_ext.dedupe_stackables(playthrough_id)
     db.ensure_playthrough_inventory(playthrough_id)
     items = db.list_playthrough_items(playthrough_id)
     equipment = db.list_playthrough_equipment(playthrough_id)
@@ -3174,7 +3598,61 @@ def get_story_detail(story_id: str, raw: Request):
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
-    return {"story": story, "characters": db.get_story_characters(story_id)}
+    chars = db.get_story_characters(story_id)
+    try:
+        imgs = {c["id"]: (c.get("image") or "") for c in db_ext.get_cast_with_images(story_id)}
+        for c in chars:
+            c["image"] = imgs.get(c["id"], "")
+    except Exception:
+        pass
+    return {"story": story, "characters": chars}
+
+@router.get("/stories/{story_id}/cast")
+def get_cast(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.get_cast_with_images(story_id)
+
+# ── Social: likes & comments ──
+@router.get("/stories/{story_id}/social")
+def story_social(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.get_story_social(story_id, user["id"])
+
+@router.post("/stories/{story_id}/like")
+def like_story(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.toggle_story_like(story_id, user["id"])
+
+@router.post("/stories/{story_id}/comments")
+def post_comment(story_id: str, req: StoryCommentRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    content = req.content.strip()
+    if not content or len(content) > 500:
+        raise HTTPException(status_code=400, detail="Comment must be 1–500 characters")
+    row = db_ext.add_story_comment(story_id, user["id"], user["username"], content)
+    if not row: raise HTTPException(status_code=500, detail="Could not post comment. Try again.")
+    return {"id": row["id"], "created_at": str(row["created_at"]), "username": user["username"], "content": content, "user_id": user["id"]}
+
+@router.delete("/stories/{story_id}/comments/{comment_id}")
+def delete_comment(story_id: str, comment_id: int, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.delete_story_comment(comment_id, user["id"], story.get("creator_id")):
+        raise HTTPException(status_code=403, detail="You can only delete your own comments")
+    return {"status": "deleted"}
 
 @router.patch("/stories/{story_id}")
 def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
@@ -3194,17 +3672,70 @@ def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
     if req.premise is not None:
         p = req.premise.strip()
         if p: fields["premise"] = p[:2000]
-    if req.cover_image is not None:
-        if len(req.cover_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
-        fields["cover_image"] = req.cover_image
-    if req.banner_image is not None:
-        if len(req.banner_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
-        fields["banner_image"] = req.banner_image
-    if not fields:
-        return {"status": "nothing_to_update"}
-    if not db_ext.update_story_fields(story_id, fields):
+    if req.coverImage is not None:
+        if req.coverImage and not _valid_data_url(req.coverImage): raise HTTPException(status_code=400, detail="Unsupported cover image.")
+        fields["cover_image"] = req.coverImage
+    if req.bannerImage is not None:
+        if req.bannerImage and not _valid_data_url(req.bannerImage): raise HTTPException(status_code=400, detail="Unsupported banner image.")
+        fields["banner_image"] = req.bannerImage
+    if fields and not db_ext.update_story_fields(story_id, fields):
         raise HTTPException(status_code=500, detail="Could not save changes. Try again.")
-    return {"status": "updated", "fields": list(fields.keys())}
+    if req.isPublic is not None:
+        db.set_story_visibility(story_id, req.isPublic)
+    meta_updates = {}
+    if req.starterLocation is not None:
+        meta_updates["starter_location"] = req.starterLocation.strip()[:120]
+    if req.tone is not None:
+        meta_updates["tone"] = req.tone.strip()[:500]
+    if meta_updates:
+        db_ext.set_story_metadata_keys(story_id, meta_updates)
+    if req.characterId:
+        cfields = {}
+        if req.characterName is not None:
+            cn = req.characterName.strip()
+            if not cn: raise HTTPException(status_code=400, detail="Character name can't be empty")
+            cfields["name"] = cn[:255]
+        if req.characterRole is not None:
+            cfields["role"] = req.characterRole.strip()[:100] or "Character"
+        if req.characterBackground is not None:
+            cfields["background"] = req.characterBackground.strip()[:2000]
+        if cfields and not db_ext.update_story_character(story_id, req.characterId, cfields):
+            raise HTTPException(status_code=404, detail="Character not found in this saga.")
+        if req.characterImage is not None:
+            if req.characterImage and not _valid_data_url(req.characterImage): raise HTTPException(status_code=400, detail="Unsupported portrait image.")
+            db_ext.set_character_image_by_id(story_id, req.characterId, req.characterImage)
+    return {"status": "updated"}
+
+@router.patch("/stories/{story_id}/characters/{char_id}")
+def update_character(story_id: str, char_id: str, req: CharacterUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+    fields = {}
+    if req.name is not None:
+        cn = req.name.strip()
+        if not cn: raise HTTPException(status_code=400, detail="Character name can't be empty")
+        fields["name"] = cn[:255]
+    if req.role is not None:
+        fields["role"] = req.role.strip()[:100] or "Character"
+    if req.background is not None:
+        fields["background"] = req.background.strip()[:2000]
+    if fields and not db_ext.update_story_character(story_id, char_id, fields):
+        raise HTTPException(status_code=404, detail="Character not found in this saga.")
+    return {"status": "updated"}
+
+@router.delete("/stories/{story_id}")
+def delete_story(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can delete this saga")
+    if not db_ext.delete_story_full(story_id):
+        raise HTTPException(status_code=500, detail="Could not delete the saga. Try again.")
+    return {"status": "deleted"}
 
 @router.post("/stories/{story_id}/art")
 def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
@@ -3215,6 +3746,11 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
     banner = req.banner or ""
+    if req.data_url and req.data_url.startswith("data:image"):
+        if str(req.kind).lower() == "banner":
+            banner = req.data_url
+        else:
+            image = req.data_url
     if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
@@ -3225,6 +3761,22 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=500, detail="Could not save the picture. Try again.")
     if banner and not db_ext.set_story_banner(story_id, banner):
         raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
+    return {"status": "updated"}
+
+@router.post("/stories/{story_id}/characters/{char_id}/art")
+def set_character_art(story_id: str, char_id: str, req: CharArtRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+    data_url = req.data_url or ""
+    if data_url and not data_url.startswith("data:image"):
+        raise HTTPException(status_code=400, detail="Unsupported image format.")
+    if len(data_url) > 900_000:
+        raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
+    if not db_ext.set_character_image_by_id(story_id, char_id, data_url):
+        raise HTTPException(status_code=404, detail="Character not found in this saga.")
     return {"status": "updated"}
 
 @router.get("/stories/{story_id}/messages")
@@ -3293,6 +3845,17 @@ def play_story(story_id: str, raw: Request):
     check_story_access(story, user)
     pt = ensure_playthrough(story_id, user)
     db.ensure_playthrough_inventory(pt["id"])
+    try:
+        sm = story.get("metadata") or {}
+        starter = (sm.get("starter_location") or "").strip()
+        pt_meta = pt.get("metadata") or {}
+        if starter and not pt_meta.get("current_location"):
+            db.update_playthrough_location(pt["id"], starter)
+            db.upsert_playthrough_location(pt["id"], starter, f"The journey begins in {starter}.")
+            db_ext.ensure_world_node(pt["id"], starter, kind="settlement", description=f"The journey begins in {starter}.")
+            pt = db.get_playthrough(pt["id"]) or pt
+    except Exception as e:
+        logger.error(f"starter location seed failed: {e}")
     return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
 
 @router.post("/stories")
@@ -3304,12 +3867,22 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
         "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
         "rules": "Keep responses immersive and descriptive."
     }
-    char_meta = {"stats": {"Health": 100, "Mana": 50}, "inventory": ["Adventurer's Kit"]}
+    if request.starterLocation.strip():
+        story_meta["starter_location"] = request.starterLocation.strip()[:120]
+    if request.tone.strip():
+        story_meta["tone"] = request.tone.strip()[:500]
+    char_meta = {"stats": {"Health": 100, "MaxHealth": 100, "Mana": 50, "MaxMana": 50}, "inventory": ["Adventurer's Kit"]}
     telemetry = request.client_telemetry
     db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,
                     creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
                            request.characterBackground, metadata=char_meta, telemetry=telemetry)
+    if request.coverImage and _valid_data_url(request.coverImage):
+        db_ext.set_story_art(story_id, request.coverImage)
+    if request.bannerImage and _valid_data_url(request.bannerImage):
+        db_ext.set_story_banner(story_id, request.bannerImage)
+    if request.characterImage and _valid_data_url(request.characterImage):
+        db_ext.set_character_image_by_id(story_id, char_id, request.characterImage)
     intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
     db.add_story_message(story_id, "system", intro_msg, msg_type="intro", telemetry=telemetry)
     return {"story_id": story_id, "status": "created", "title": request.title}
@@ -3990,13 +4563,23 @@ import { getLocalUser, saveLocalUser, getLocalStory, saveLocalStory, getLocalPla
 import { applyStateUpdateToCache, getCachedStoryContext, cacheInventory } from "./utils/hudStore";
 import { syncQueue } from "./utils/syncQueue";
 
+// FE-BUG-1 FIX + LEVEL SYSTEM HOOK: centralized stat clamps.
+// Level 1 caps: Health 0..100, Mana 0..50. Raising MaxHealth/MaxMana raises caps.
+function clampStat(stat, value, stats = {}) {
+  const v = Number(value);
+  if (Number.isNaN(v)) return value;
+  if (stat === "Health") return Math.max(0, Math.min(v, Number(stats.MaxHealth ?? 100)));
+  if (stat === "Mana") return Math.max(0, Math.min(v, Number(stats.MaxMana ?? 50)));
+  if (stat === "MaxHealth" || stat === "MaxMana") return Math.max(1, Math.min(v, 999));
+  return Math.max(0, Math.min(v, 999));
+}
+
 export default function App() {
   const [view, setView] = useState("landing");
   const [storyContext, setStoryContext] = useState(null);
   const [user, setUser] = useState(getSavedUser());
   const [pendingAction, setPendingAction] = useState(null);
   const [detailsStory, setDetailsStory] = useState(null);
-
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -4153,7 +4736,6 @@ export default function App() {
         syncQueue.enqueue('SYNC_HUD', { ptId: pt.id, key: 'world' }, 'normal');
         syncQueue.enqueue('COMPRESS_MEMORY', { ptId: pt.id }, 'normal');
       }
-
     } catch (err) {
       console.error("[startJourney] error:", err);
       setStoryContext(null);
@@ -4184,11 +4766,8 @@ export default function App() {
 
   const handleUpdateStory = async (storyId, storyData) => {
     try {
-      const enriched = await withTelemetry({
-        title: storyData.title,
-        genre: storyData.genre,
-        premise: storyData.premise,
-      });
+      // Pass the FULL payload through (title/genre/premise/images/visibility/starter/tone/character)
+      const enriched = await withTelemetry(storyData);
       const res = await fetch(`${BASE_URL}/stories/${storyId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -4197,7 +4776,6 @@ export default function App() {
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
       setEditingStory(null);
-      // Refresh detail page with updated data
       setDetailsStory(prev => prev && prev.id === storyId ? { ...prev, ...storyData } : prev);
       setView("details");
     } catch (err) {
@@ -4272,12 +4850,16 @@ export default function App() {
               if (up.type === "LOCATION_UPDATE") {
                 newContext.current_location = up.location;
               } else if (up.type === "STAT_UPDATE") {
+                // FE-BUG-1 FIX: signed updates are deltas — add to current, then clamp.
                 const charIdx = newChars.findIndex(c => c.character_name.toLowerCase() === up.character.toLowerCase());
                 if (charIdx !== -1) {
                   const c = newChars[charIdx];
                   const meta = { ...(c.metadata || {}) };
                   const stats = { ...(meta.stats || {}) };
-                  stats[up.stat] = up.value;
+                  const fallback = up.stat === "Health" ? 100 : up.stat === "Mana" ? 50 : 0;
+                  const current = Number(stats[up.stat] ?? fallback);
+                  const next = up.is_delta ? current + Number(up.value) : Number(up.value);
+                  stats[up.stat] = clampStat(up.stat, next, stats);
                   meta.stats = stats;
                   newChars[charIdx] = { ...c, metadata: meta };
                 }
@@ -5703,39 +6285,75 @@ export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDele
 }
 
 =====FILE: frontend/src/components/StoryCreator.jsx=====
-import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Wand2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ArrowLeft, Wand2, Globe, Lock, X, ImageIcon } from 'lucide-react';
+import { fileToDataUrl } from '../utils/art';
+
+const GENRES = ['Fantasy', 'Sci-Fi', 'Cyberpunk', 'Lovecraftian Horror', 'Modern Slice of Life', 'Mystery', 'Post-Apocalyptic', 'Historical', 'Wuxia'];
+
+function ImageField({ label, value, onChange, hint }) {
+  const ref = useRef(null);
+  const pick = async (file) => {
+    if (!file) return;
+    try { onChange(await fileToDataUrl(file)); } catch (e) { console.warn('[art]', e); }
+  };
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-400 mb-2">{label}</label>
+      <div className="flex items-center gap-3">
+        <div className="w-20 h-14 rounded-lg overflow-hidden bg-gray-800 border border-gray-700 flex items-center justify-center flex-shrink-0">
+          {value ? <img src={value} alt={label} className="w-full h-full object-cover" /> : <ImageIcon size={16} className="text-gray-600" />}
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => ref.current?.click()} className="px-3 min-h-[44px] rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium touch-manipulation active:scale-95">Choose</button>
+          {value && (
+            <button type="button" onClick={() => onChange('')} className="px-3 min-h-[44px] rounded-lg bg-gray-800 hover:bg-red-600/40 text-gray-300 text-xs touch-manipulation active:scale-95"><X size={13} /></button>
+          )}
+        </div>
+      </div>
+      {hint && <p className="text-[11px] text-gray-600 mt-1">{hint}</p>}
+      <input ref={ref} type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; pick(f); }} />
+    </div>
+  );
+}
 
 export default function StoryCreator({ onStart, onBack, initialData, isEditing, onUpdate }) {
   const [step, setStep] = useState(1);
+  const [busy, setBusy] = useState(false);
   const [data, setData] = useState({
-    title: '',
-    genre: 'Fantasy',
-    premise: '',
-    characterName: '',
-    characterRole: 'Protagonist',
-    characterBackground: ''
+    title: '', genre: 'Fantasy', premise: '', starterLocation: '', tone: '', isPublic: true,
+    coverImage: '', bannerImage: '',
+    characterName: '', characterRole: 'Protagonist', characterBackground: '', characterImage: '', characterId: ''
   });
 
   useEffect(() => {
-    if (initialData) {
-      setData(prev => ({
-        ...prev,
-        title: initialData.title || '',
-        genre: initialData.genre || 'Fantasy',
-        premise: initialData.premise || '',
-      }));
-    }
+    if (!initialData) return;
+    const pc = (initialData.characters || []).find(c => c.is_player) || (initialData.characters || [])[0];
+    setData(prev => ({
+      ...prev,
+      title: initialData.title || '',
+      genre: initialData.genre || 'Fantasy',
+      premise: initialData.premise || '',
+      starterLocation: initialData.metadata?.starter_location || '',
+      tone: initialData.metadata?.tone || '',
+      isPublic: initialData.is_public ?? true,
+      coverImage: initialData.cover_image || '',
+      bannerImage: initialData.banner_image || '',
+      characterName: pc?.name || '',
+      characterRole: pc?.role || 'Protagonist',
+      characterBackground: pc?.background || '',
+      characterImage: pc?.image || '',
+      characterId: pc?.id || ''
+    }));
   }, [initialData]);
 
-  const handleNext = () => setStep(s => s + 1);
-  const handleBack = () => setStep(s => s - 1);
+  const set = (k, v) => setData(d => ({ ...d, [k]: v }));
+  const inputCls = "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none";
+
   const handleFinish = () => {
-    if (isEditing && onUpdate && initialData) {
-      onUpdate(initialData.id, data);
-    } else {
-      onStart(data);
-    }
+    setBusy(true);
+    if (isEditing && onUpdate && initialData) onUpdate(initialData.id, data);
+    else onStart(data);
   };
 
   return (
@@ -5744,101 +6362,108 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
         <button onClick={onBack} className="absolute top-3 left-3 md:top-4 md:left-4 text-gray-500 hover:text-white flex items-center gap-2 text-sm min-h-[44px] min-w-[44px] justify-center touch-manipulation">
           <ArrowLeft className="w-4 h-4" /> Back
         </button>
-
         <div className="text-center mb-6 md:mb-8 pt-8 md:pt-0">
           <h2 className="text-2xl md:text-3xl font-bold text-white mb-2">{isEditing ? 'Edit Your Saga' : 'Forge Your Saga'}</h2>
           <div className="h-1 w-24 bg-purple-500 mx-auto rounded-full"></div>
+          <p className="text-xs text-gray-500 mt-2">Step {step} of 3 — {step === 1 ? 'World & Visibility' : step === 2 ? 'Protagonist' : 'Review'}</p>
         </div>
 
         {step === 1 && (
           <div className="space-y-5 md:space-y-6 animate-fade-in">
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">Story Title</label>
-              <input 
-                type="text" 
-                placeholder="e.g., The Clockwork Crown" 
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none"
-                value={data.title}
-                onChange={e => setData({...data, title: e.target.value})}
-              />
+              <input type="text" placeholder="e.g., The Clockwork Crown" className={inputCls} value={data.title} onChange={e => set('title', e.target.value)} />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">Genre</label>
-              <select 
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white"
-                value={data.genre}
-                onChange={e => setData({...data, genre: e.target.value})}
-              >
-                <option>Fantasy</option>
-                <option>Sci-Fi</option>
-                <option>Cyberpunk</option>
-                <option>Lovecraftian Horror</option>
-                <option>Modern Slice of Life</option>
+              <select className={inputCls} value={data.genre} onChange={e => set('genre', e.target.value)}>
+                {GENRES.map(g => <option key={g}>{g}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">The Premise</label>
-              <textarea 
-                placeholder="Describe the world and the initial conflict..." 
-                rows="4"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white resize-none"
-                value={data.premise}
-                onChange={e => setData({...data, premise: e.target.value})}
-              />
+              <textarea placeholder="Describe the world and the initial conflict..." rows="4" className={`${inputCls} resize-none`} value={data.premise} onChange={e => set('premise', e.target.value)} />
             </div>
-            <button onClick={handleNext} disabled={!data.title} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation active:scale-95">
-              {isEditing ? 'Next: Review' : 'Next: Character Creation'}
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Starting Location <span className="text-gray-600">(optional)</span></label>
+              <input type="text" placeholder="e.g., The port city of Vhal" className={inputCls} value={data.starterLocation} onChange={e => set('starterLocation', e.target.value)} />
+              <p className="text-[11px] text-gray-600 mt-1">Every new journey begins here and the world map is seeded with it.</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Tone & Style Direction <span className="text-gray-600">(optional)</span></label>
+              <textarea placeholder="e.g., Gritty and political; keep magic rare and costly." rows="2" className={`${inputCls} resize-none`} value={data.tone} onChange={e => set('tone', e.target.value)} />
+            </div>
+            <div className="flex items-center justify-between bg-gray-800/50 border border-gray-700 rounded-xl px-4 py-3">
+              <span className="flex items-center gap-2 text-sm text-gray-300">
+                {data.isPublic ? <Globe size={15} className="text-emerald-400" /> : <Lock size={15} className="text-amber-400" />}
+                {data.isPublic ? 'Public — anyone can play' : 'Private — only you'}
+              </span>
+              <button type="button" onClick={() => set('isPublic', !data.isPublic)} className={`w-12 h-7 rounded-full transition-colors touch-manipulation ${data.isPublic ? 'bg-emerald-600' : 'bg-gray-700'}`}>
+                <span className={`block w-5 h-5 bg-white rounded-full transition-transform ${data.isPublic ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+            <ImageField label="Cover Image" value={data.coverImage} onChange={v => set('coverImage', v)} hint="Shown on library cards." />
+            <ImageField label="Banner Image" value={data.bannerImage} onChange={v => set('bannerImage', v)} hint="Shown on the story page header." />
+            <button onClick={() => setStep(2)} disabled={!data.title} className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation active:scale-95">
+              Next: Protagonist
             </button>
           </div>
         )}
 
         {step === 2 && (
           <div className="space-y-5 md:space-y-6 animate-fade-in">
-            {isEditing ? (
-              <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700">
-                <p className="text-sm text-gray-400">Character creation is locked during edit mode to preserve your active playthroughs. You can update the story title, genre, and premise above.</p>
-              </div>
-            ) : (
-              <>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-2">Character Name</label>
-                  <input 
-                    type="text" 
-                    placeholder="Who are you playing?" 
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white"
-                    value={data.characterName}
-                    onChange={e => setData({...data, characterName: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-2">Role / Class</label>
-                  <input 
-                    type="text" 
-                    placeholder="e.g. Exiled Paladin, Rogue Hacker" 
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white"
-                    value={data.characterRole}
-                    onChange={e => setData({...data, characterRole: e.target.value})}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-2">Character Background</label>
-                  <textarea 
-                    placeholder="What is their history, motivation, or dark secret?" 
-                    rows="4"
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-base text-white resize-none"
-                    value={data.characterBackground}
-                    onChange={e => setData({...data, characterBackground: e.target.value})}
-                  />
-                </div>
-              </>
+            {isEditing && (
+              <p className="text-[11px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+                Character edits apply to NEW journeys. Existing journeys keep their own copy of the cast.
+              </p>
             )}
-            
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Character Name</label>
+              <input type="text" placeholder="Who are you playing?" className={inputCls} value={data.characterName} onChange={e => set('characterName', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Role / Class</label>
+              <input type="text" placeholder="e.g. Exiled Paladin, Rogue Hacker" className={inputCls} value={data.characterRole} onChange={e => set('characterRole', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Character Background</label>
+              <textarea placeholder="What is their history, motivation, or dark secret?" rows="4" className={`${inputCls} resize-none`} value={data.characterBackground} onChange={e => set('characterBackground', e.target.value)} />
+            </div>
+            <ImageField label="Portrait" value={data.characterImage} onChange={v => set('characterImage', v)} hint="Shown on the story page cast list." />
             <div className="flex gap-3 pt-2">
-              <button onClick={handleBack} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">
-                Back
-              </button>
-              <button onClick={handleFinish} disabled={!isEditing && !data.characterName} className="flex-[2] bg-gradient-to-r from-purple-600 to-blue-600 hover:opacity-90 text-white font-bold py-3.5 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50 touch-manipulation active:scale-95">
-                <Wand2 className="w-4 h-4 md:w-5 md:h-5" /> {isEditing ? 'Save Changes' : 'Begin Adventure'}
+              <button onClick={() => setStep(1)} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">Back</button>
+              <button onClick={() => setStep(3)} disabled={!data.characterName} className="flex-[2] bg-purple-600 hover:bg-purple-700 text-white font-bold py-3.5 rounded-lg disabled:opacity-50 touch-manipulation active:scale-95">Next: Review</button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-4 animate-fade-in">
+            {(data.coverImage || data.bannerImage) && (
+              <div className="h-32 rounded-xl overflow-hidden bg-gray-800">
+                <img src={data.bannerImage || data.coverImage} alt="banner" className="w-full h-full object-cover" />
+              </div>
+            )}
+            <div className="bg-gray-800/50 border border-gray-700 rounded-xl p-4 space-y-1">
+              <p className="text-lg font-semibold text-white">{data.title}</p>
+              <p className="text-xs text-purple-400">{data.genre} · {data.isPublic ? 'Public' : 'Private'}</p>
+              {data.starterLocation && <p className="text-xs text-blue-300">Starts in: {data.starterLocation}</p>}
+              {data.tone && <p className="text-xs text-gray-400 italic">Tone: {data.tone}</p>}
+              <p className="text-sm text-gray-300 mt-2 leading-relaxed">{data.premise}</p>
+            </div>
+            <div className="bg-gray-800/50 border border-gray-700 rounded-xl p-4 flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg overflow-hidden bg-gray-800 flex items-center justify-center flex-shrink-0">
+                {data.characterImage ? <img src={data.characterImage} alt="portrait" className="w-full h-full object-cover" /> : <Wand2 size={16} className="text-purple-400" />}
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-white truncate">{data.characterName}</p>
+                <p className="text-xs text-gray-500 truncate">{data.characterRole}</p>
+              </div>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <button onClick={() => setStep(2)} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3.5 rounded-lg touch-manipulation active:scale-95">Back</button>
+              <button onClick={handleFinish} disabled={busy} className="flex-[2] bg-gradient-to-r from-purple-600 to-blue-600 hover:opacity-90 text-white font-bold py-3.5 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50 touch-manipulation active:scale-95">
+                <Wand2 className="w-4 h-4 md:w-5 md:h-5" /> {busy ? 'Saving…' : isEditing ? 'Save Changes' : 'Begin Adventure'}
               </button>
             </div>
           </div>
@@ -5850,23 +6475,44 @@ export default function StoryCreator({ onStart, onBack, initialData, isEditing, 
 
 =====FILE: frontend/src/components/StoryDetails.jsx=====
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon } from 'lucide-react';
+import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon, Heart, MessageCircle, Send, Trash2, MapPin, Feather } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, describeNetworkError } from '../utils/auth';
+
+function timeAgo(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'Just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
 
 export default function StoryDetails({ story, user, onBack, onStartJourney, onEdit }) {
   const [full, setFull] = useState(story || null);
-  const [loading, setLoading] = useState(!story?.premise);
+  const [social, setSocial] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
+  const [expandedCast, setExpandedCast] = useState({});
+  const [commentText, setCommentText] = useState('');
+  const [posting, setPosting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
-    if (story?.premise) return; // already have rich data
+    if (!story?.id) return;
     let alive = true;
     (async () => {
       try {
-        const res = await fetch(`${BASE_URL}/stories/${story.id}`, { headers: authHeaders() });
-        const data = await parseJsonSafe(res);
-        if (!res.ok) throw new Error(data?.detail || 'Could not load story');
-        if (alive) setFull({ ...story, ...data.story, characters: data.characters || [] });
+        const [sRes, socRes] = await Promise.all([
+          fetch(`${BASE_URL}/stories/${story.id}`, { headers: authHeaders() }),
+          fetch(`${BASE_URL}/stories/${story.id}/social`, { headers: authHeaders() }),
+        ]);
+        const data = await parseJsonSafe(sRes);
+        if (!sRes.ok) throw new Error(data?.detail || 'Could not load story');
+        const soc = socRes.ok ? await parseJsonSafe(socRes) : null;
+        if (!alive) return;
+        setFull(prev => ({ ...(prev || story), ...data.story, characters: data.characters || [] }));
+        if (soc) setSocial(soc);
       } catch (e) {
         if (alive) setErr(describeNetworkError(e));
       } finally {
@@ -5883,6 +6529,66 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
   const isPublic = full?.is_public ?? story.is_public ?? true;
   const cast = (full?.characters || []).slice(0, 6);
   const banner = full?.banner_image || full?.cover_image;
+  const meta = full?.metadata || {};
+
+  const handleLike = async () => {
+    try {
+      const res = await fetch(`${BASE_URL}/stories/${story.id}/like`, { method: 'POST', headers: authHeaders() });
+      const data = await parseJsonSafe(res);
+      if (res.ok) setSocial(prev => ({ ...(prev || { comments: [] }), ...data }));
+    } catch (e) { console.warn('[like]', e); }
+  };
+
+  const handlePostComment = async () => {
+    const content = commentText.trim();
+    if (!content || posting) return;
+    setPosting(true);
+    try {
+      const res = await fetch(`${BASE_URL}/stories/${story.id}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ content }),
+      });
+      const data = await parseJsonSafe(res);
+      if (res.ok) {
+        setSocial(prev => ({ ...(prev || { liked: false, like_count: 0 }), comments: [data, ...(prev?.comments || [])] }));
+        setCommentText('');
+      } else {
+        setErr(data?.detail || 'Could not post comment');
+      }
+    } catch (e) {
+      setErr(describeNetworkError(e));
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const handleDeleteComment = async (cid) => {
+    try {
+      const res = await fetch(`${BASE_URL}/stories/${story.id}/comments/${cid}`, { method: 'DELETE', headers: authHeaders() });
+      if (res.ok) setSocial(prev => prev ? { ...prev, comments: (prev.comments || []).filter(c => c.id !== cid) } : prev);
+    } catch (e) { console.warn('[delete comment]', e); }
+  };
+
+  const handleDeleteStory = async () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      setTimeout(() => setConfirmDelete(false), 3000);
+      return;
+    }
+    try {
+      const res = await fetch(`${BASE_URL}/stories/${story.id}`, { method: 'DELETE', headers: authHeaders() });
+      if (res.ok) onBack();
+      else {
+        const data = await parseJsonSafe(res);
+        setErr(data?.detail || 'Could not delete the saga');
+        setConfirmDelete(false);
+      }
+    } catch (e) {
+      setErr(describeNetworkError(e));
+      setConfirmDelete(false);
+    }
+  };
 
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">
@@ -5897,34 +6603,49 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
           </p>
         </div>
         {isOwner && (
-          <button
-            onClick={() => onEdit(full || story)}
-            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium min-h-[44px] touch-manipulation active:scale-95"
-          >
-            <Pencil size={14} /> Edit
-          </button>
+          <>
+            <button
+              onClick={() => onEdit(full || story)}
+              className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium min-h-[44px] touch-manipulation active:scale-95"
+            >
+              <Pencil size={14} /> Edit
+            </button>
+            <button
+              onClick={handleDeleteStory}
+              className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-medium min-h-[44px] touch-manipulation active:scale-95 ${confirmDelete ? 'bg-red-600 text-white' : 'bg-gray-800 hover:bg-red-600/40 text-red-400'}`}
+              title="Delete saga"
+            >
+              {confirmDelete ? 'Sure?' : <Trash2 size={14} />}
+            </button>
+          </>
         )}
       </header>
 
       {err && (
-        <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/20 text-red-400 text-sm">{err}</div>
+        <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/20 text-red-400 text-sm flex items-center justify-between">
+          <span>{err}</span>
+          <button onClick={() => setErr(null)} className="text-red-300 text-xs underline">dismiss</button>
+        </div>
       )}
 
       <div className="flex-1 overflow-y-auto">
         {banner && (
-          <div className="h-40 sm:h-56 w-full overflow-hidden bg-gray-900 flex items-center justify-center">
-            <img src={banner} alt={full?.title} className="w-full h-full object-cover" />
+          <div className="h-40 sm:h-56 w-full overflow-hidden bg-gray-900">
+            <img src={banner} alt={full?.title || story.title} className="w-full h-full object-cover" />
           </div>
         )}
 
         <div className="px-4 sm:px-6 py-5 max-w-3xl mx-auto space-y-5">
           <div>
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
               <span className="text-[10px] font-bold uppercase tracking-wide text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">{full?.genre || story.genre}</span>
               {isPublic ? (
                 <span className="text-[10px] text-emerald-400 flex items-center gap-1"><Globe size={10} /> Public</span>
               ) : (
                 <span className="text-[10px] text-amber-400 flex items-center gap-1"><Lock size={10} /> Private</span>
+              )}
+              {meta.starter_location && (
+                <span className="text-[10px] text-blue-300 flex items-center gap-1"><MapPin size={10} /> {meta.starter_location}</span>
               )}
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold text-white leading-tight">{full?.title || story.title}</h1>
@@ -5933,41 +6654,117 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
                 by <span className="text-gray-200 font-medium">{full?.creator_name || story.creator_name}</span>
               </p>
             )}
+            {meta.tone && (
+              <p className="text-xs text-gray-500 italic mt-2 flex items-center gap-1.5"><Feather size={11} /> {meta.tone}</p>
+            )}
+            {/* Like button */}
+            <div className="flex items-center gap-3 mt-3">
+              <button
+                onClick={handleLike}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium min-h-[44px] touch-manipulation active:scale-95 transition-colors ${
+                  social?.liked ? 'bg-pink-500/20 text-pink-400 border border-pink-500/40' : 'bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700'
+                }`}
+              >
+                <Heart size={16} className={social?.liked ? 'fill-pink-400' : ''} />
+                {social?.liked ? 'Liked' : 'Like'}
+                <span className="text-xs opacity-80">({social?.like_count ?? 0})</span>
+              </button>
+              <span className="flex items-center gap-1.5 text-xs text-gray-500">
+                <MessageCircle size={13} /> {(social?.comments || []).length} comment{(social?.comments || []).length === 1 ? '' : 's'}
+              </span>
+            </div>
           </div>
 
           <div>
             <h3 className="text-[11px] uppercase tracking-wide text-gray-500 font-bold mb-1.5">Premise</h3>
-            <p className="text-sm text-gray-300 leading-relaxed">{full?.premise || story.premise}</p>
+            <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{full?.premise || story.premise}</p>
           </div>
 
           {cast.length > 0 && (
             <div>
               <h3 className="text-[11px] uppercase tracking-wide text-gray-500 font-bold mb-2 flex items-center gap-1.5">
-                <Users size={12} /> Cast
+                <Users size={12} /> Cast <span className="normal-case font-normal text-gray-600">— tap a card for full background</span>
               </h3>
               <div className="space-y-2">
-                {cast.map(c => (
-                  <div key={c.id} className="bg-gray-900/60 border border-gray-800 rounded-xl p-3 flex items-start gap-3">
-                    {c.image ? (
-                      <img src={c.image} alt={c.name} className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800" />
-                    ) : (
-                      <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
-                        <Sparkles size={14} className="text-purple-400" />
+                {cast.map(c => {
+                  const expanded = !!expandedCast[c.id];
+                  return (
+                    <div
+                      key={c.id}
+                      onClick={() => setExpandedCast(p => ({ ...p, [c.id]: !p[c.id] }))}
+                      className="bg-gray-900/60 border border-gray-800 hover:border-purple-500/40 rounded-xl p-3 flex items-start gap-3 cursor-pointer touch-manipulation active:scale-[0.99] transition-colors"
+                    >
+                      {c.image ? (
+                        <img src={c.image} alt={c.name} className="w-10 h-10 rounded-lg object-cover flex-shrink-0 bg-gray-800" />
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center flex-shrink-0">
+                          <Sparkles size={14} className="text-purple-400" />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold text-white truncate">{c.name}</p>
+                          {c.is_player && <span className="text-[9px] uppercase font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">You</span>}
+                        </div>
+                        <p className="text-[11px] text-gray-500">{c.role}</p>
+                        {c.background && (
+                          <p className={`text-[11px] text-gray-400 mt-0.5 ${expanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{c.background}</p>
+                        )}
+                        {c.background && !expanded && <p className="text-[10px] text-purple-400/70 mt-1">Read more ▾</p>}
                       </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-semibold text-white truncate">{c.name}</p>
-                        {c.is_player && <span className="text-[9px] uppercase font-bold text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">You</span>}
-                      </div>
-                      <p className="text-[11px] text-gray-500">{c.role}</p>
-                      {c.background && <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-2">{c.background}</p>}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
+
+          {/* Comments */}
+          <div>
+            <h3 className="text-[11px] uppercase tracking-wide text-gray-500 font-bold mb-2 flex items-center gap-1.5">
+              <MessageCircle size={12} /> Reader Comments
+            </h3>
+            <div className="flex gap-2 mb-3">
+              <input
+                type="text"
+                value={commentText}
+                onChange={e => setCommentText(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handlePostComment(); }}
+                placeholder="Share your thoughts…"
+                maxLength={500}
+                className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white focus:border-purple-500 outline-none min-h-[44px]"
+              />
+              <button
+                onClick={handlePostComment}
+                disabled={!commentText.trim() || posting}
+                className="px-4 rounded-xl bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white min-h-[44px] min-w-[44px] flex items-center justify-center touch-manipulation active:scale-95"
+              >
+                <Send size={15} />
+              </button>
+            </div>
+            {(social?.comments || []).length === 0 ? (
+              <p className="text-xs text-gray-600">No comments yet — be the first to react.</p>
+            ) : (
+              <div className="space-y-2">
+                {(social?.comments || []).map(c => (
+                  <div key={c.id} className="bg-gray-900/60 border border-gray-800 rounded-xl px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-purple-300 truncate">{c.username}</p>
+                      <span className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-[10px] text-gray-600">{timeAgo(c.created_at)}</span>
+                        {(c.user_id === user?.id || isOwner) && (
+                          <button onClick={() => handleDeleteComment(c.id)} className="text-gray-600 hover:text-red-400 min-w-[28px] min-h-[28px] flex items-center justify-center touch-manipulation" title="Delete comment">
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-300 mt-1 leading-relaxed whitespace-pre-wrap">{c.content}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {!banner && (
             <div className="bg-gray-900/60 border border-dashed border-gray-700 rounded-xl p-5 flex items-center gap-3 text-gray-400 text-xs">
@@ -5976,7 +6773,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
             </div>
           )}
 
-          <div className="pt-2 flex flex-col gap-2">
+          <div className="pt-2 flex flex-col gap-2 pb-6">
             <button
               onClick={() => onStartJourney(full || story)}
               disabled={loading}
@@ -5999,7 +6796,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
 
 =====FILE: frontend/src/components/StoryLibrary.jsx=====
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { ArrowLeft, BookOpen, Plus, Clock, History, Globe, User, Image as ImageIcon } from 'lucide-react';
+import { ArrowLeft, BookOpen, Plus, Clock, History, Globe, User, Image as ImageIcon, Heart, MessageCircle } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkError } from '../utils/auth';
 
 function timeAgo(iso) {
@@ -6039,6 +6836,7 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const [myStories, setMyStories] = useState(null);
   const [history, setHistory] = useState(null);
   const [art, setArt] = useState({});
+  const [social, setSocial] = useState({});
   const [error, setError] = useState(null);
   const fileRef = useRef(null);
   const uploadTarget = useRef(null);
@@ -6053,6 +6851,7 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
       fetch(`${BASE_URL}/stories?scope=mine`, { headers: authHeaders(), signal: controller.signal }),
       fetch(`${BASE_URL}/playthroughs`, { headers: authHeaders(), signal: controller.signal }),
       fetch(`${BASE_URL}/stories/art`, { headers: authHeaders(), signal: controller.signal }),
+      fetch(`${BASE_URL}/stories/social`, { headers: authHeaders(), signal: controller.signal }),
     ];
 
     const results = await Promise.allSettled(jobs);
@@ -6088,7 +6887,6 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
     if (artRes.status === 'fulfilled' && artRes.value.ok) {
       try {
         const artData = await parseJsonSafe(artRes.value);
-        // Art endpoint now returns {id: {cover, banner}}
         const flat = {};
         if (artData && typeof artData === 'object') {
           for (const [k, v] of Object.entries(artData)) {
@@ -6097,6 +6895,14 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
           }
         }
         setArt(flat);
+      } catch { /* non-fatal */ }
+    }
+
+    const socRes = results[4];
+    if (socRes.status === 'fulfilled' && socRes.value.ok) {
+      try {
+        const socData = await parseJsonSafe(socRes.value);
+        if (socData && typeof socData === 'object') setSocial(socData);
       } catch { /* non-fatal */ }
     }
 
@@ -6133,9 +6939,8 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
   const renderCard = (s, isHistory) => {
     const sid = s.story_id || s.id;
     const cover = art[sid];
-    // Author is always available now: list_all_stories + list_stories_for_user both return creator_name
+    const soc = social[sid];
     const authorName = s.creator_name || (isHistory ? null : (user?.username || null));
-    // Pass the full row so StoryDetails has everything it needs
     const payload = {
       id: sid,
       story_id: s.story_id,
@@ -6184,10 +6989,16 @@ export default function StoryLibrary({ user, onOpenStory, onNewStory, onBack }) 
         </div>
         <h3 className="text-lg font-semibold text-white truncate">{s.title}</h3>
         <p className="text-sm text-gray-500 line-clamp-2 mt-1">{s.premise}</p>
-        <p className="text-xs text-gray-400 mt-3 truncate">
-          {s.character_name ? `${s.character_name} · ` : ""}
-          {authorName ? `by ${authorName} · ` : ""}
-          {isHistory ? `Day ${s.current_day} · ${s.time_of_day}` : (s.played_count > 0 ? 'Played' : 'New')}
+        <p className="text-xs text-gray-400 mt-3 truncate flex items-center gap-1.5 flex-wrap">
+          {s.character_name ? <span>{s.character_name} ·</span> : null}
+          {authorName ? <span>by {authorName} ·</span> : null}
+          {isHistory ? <span>Day {s.current_day} · {s.time_of_day}</span> : <span>{s.played_count > 0 ? 'Played' : 'New'}</span>}
+          {!isHistory && soc && (soc.likes > 0 || soc.comments > 0) && (
+            <span className="flex items-center gap-1.5 text-gray-500">
+              {soc.likes > 0 && <span className="flex items-center gap-0.5"><Heart size={10} className="text-pink-400" /> {soc.likes}</span>}
+              {soc.comments > 0 && <span className="flex items-center gap-0.5"><MessageCircle size={10} className="text-blue-400" /> {soc.comments}</span>}
+            </span>
+          )}
         </p>
       </button>
     );
@@ -8081,6 +8892,27 @@ CREATE TABLE IF NOT EXISTS world_events (
 );
 CREATE INDEX IF NOT EXISTS idx_world_events_pt ON world_events (playthrough_id, day DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_world_nodes_state ON world_nodes (playthrough_id, node_type);
+
+=====FILE: migrations/0014_social.sql=====
+-- 0014_social.sql — Social layer: likes + comments
+-- Additive-only; deploy-order safe.
+CREATE TABLE IF NOT EXISTS story_likes (
+    story_id VARCHAR(36) NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (story_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_story_likes_story ON story_likes(story_id);
+
+CREATE TABLE IF NOT EXISTS story_comments (
+    id SERIAL PRIMARY KEY,
+    story_id VARCHAR(36) NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    username VARCHAR(80) NOT NULL DEFAULT 'Adventurer',
+    content TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_story_comments_story ON story_comments(story_id, created_at DESC);
 
 =====FILE: render.yaml=====
 services:

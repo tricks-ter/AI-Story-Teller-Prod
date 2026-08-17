@@ -61,3 +61,9 @@ Migration 0014_social.sql (deploy-time):
 Relations: stories 1-N story_likes | story_comments.
 Method → table additions (api/db_ext.py): toggle_story_like / get_story_social / get_all_story_social_counts → story_likes+story_comments · add_story_comment / delete_story_comment → story_comments · delete_story_full → stories (cascade).
 Invariants: deleting a story cascades ALL related rows (characters, messages, notes, playthroughs, likes, comments); comment deletion allowed for comment author or story author (legacy-claim included); username is denormalized on comments so display survives user changes.
+
+## ADDENDUM — UX WORKFLOW SPRINT (2026-08-17)
+Frontend-only sprint (search/filter/sort, Recently Played, skeletons, toasts, share
+deep-link, onboarding). NO schema or query changes — all features run on data already
+returned by existing endpoints (GET /stories, /playthroughs, /stories/art, /stories/social).
+This contract is unchanged and remains authoritative.

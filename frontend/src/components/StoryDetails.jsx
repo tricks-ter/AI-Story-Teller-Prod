@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon, Heart, MessageCircle, Send, Trash2, MapPin, Feather } from 'lucide-react';
+import { ArrowLeft, Play, Plus, Pencil, Globe, Lock, Users, Sparkles, Image as ImageIcon, Heart, MessageCircle, Send, Trash2, MapPin, Feather, Share2 } from 'lucide-react';
 import { BASE_URL, authHeaders, parseJsonSafe, describeNetworkError } from '../utils/auth';
+import { toast } from '../utils/toast';
+import Toaster from './Toaster';
 
 function timeAgo(iso) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -55,6 +57,26 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
   const banner = full?.banner_image || full?.cover_image;
   const meta = full?.metadata || {};
 
+  const handleCopyLink = async () => {
+    const url = `${window.location.origin}${window.location.pathname}?story=${story.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success('Share link copied');
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        toast.success('Share link copied');
+      } catch {
+        toast.error('Could not copy the link');
+      }
+    }
+  };
+
   const handleLike = async () => {
     try {
       const res = await fetch(`${BASE_URL}/stories/${story.id}/like`, { method: 'POST', headers: authHeaders() });
@@ -77,11 +99,12 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
       if (res.ok) {
         setSocial(prev => ({ ...(prev || { liked: false, like_count: 0 }), comments: [data, ...(prev?.comments || [])] }));
         setCommentText('');
+        toast.success('Comment posted');
       } else {
-        setErr(data?.detail || 'Could not post comment');
+        toast.error(data?.detail || 'Could not post comment');
       }
     } catch (e) {
-      setErr(describeNetworkError(e));
+      toast.error(describeNetworkError(e));
     } finally {
       setPosting(false);
     }
@@ -90,7 +113,10 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
   const handleDeleteComment = async (cid) => {
     try {
       const res = await fetch(`${BASE_URL}/stories/${story.id}/comments/${cid}`, { method: 'DELETE', headers: authHeaders() });
-      if (res.ok) setSocial(prev => prev ? { ...prev, comments: (prev.comments || []).filter(c => c.id !== cid) } : prev);
+      if (res.ok) {
+        setSocial(prev => prev ? { ...prev, comments: (prev.comments || []).filter(c => c.id !== cid) } : prev);
+        toast.success('Comment deleted');
+      }
     } catch (e) { console.warn('[delete comment]', e); }
   };
 
@@ -102,20 +128,21 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
     }
     try {
       const res = await fetch(`${BASE_URL}/stories/${story.id}`, { method: 'DELETE', headers: authHeaders() });
-      if (res.ok) onBack();
+      if (res.ok) { toast.success('Saga deleted'); onBack(); }
       else {
         const data = await parseJsonSafe(res);
-        setErr(data?.detail || 'Could not delete the saga');
+        toast.error(data?.detail || 'Could not delete the saga');
         setConfirmDelete(false);
       }
     } catch (e) {
-      setErr(describeNetworkError(e));
+      toast.error(describeNetworkError(e));
       setConfirmDelete(false);
     }
   };
 
   return (
     <div className="min-h-[100dvh] bg-gray-950 text-gray-100 flex flex-col">
+      <Toaster />
       <header className="flex items-center gap-2 px-3 py-3 border-b border-gray-800 bg-gray-900 flex-shrink-0">
         <button onClick={onBack} className="p-2.5 rounded-xl hover:bg-gray-800 text-gray-400 min-w-[44px] min-h-[44px] flex items-center justify-center touch-manipulation">
           <ArrowLeft size={18} />
@@ -126,6 +153,13 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
             {full?.creator_name ? `by ${full.creator_name}` : (story.creator_name ? `by ${story.creator_name}` : 'Unknown author')}
           </p>
         </div>
+        <button
+          onClick={handleCopyLink}
+          className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium min-h-[44px] touch-manipulation active:scale-95"
+          title="Copy share link"
+        >
+          <Share2 size={14} /> Share
+        </button>
         {isOwner && (
           <>
             <button

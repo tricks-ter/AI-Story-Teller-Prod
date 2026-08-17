@@ -1,7 +1,7 @@
 # FRONTEND MASTER CONTRACT — InkMind
-> Verified vs commit f32ebcc + "comprehensive forge + masters" commit. APPEND-ONLY:
-> never remove entries or restructure until the user explicitly orders a refactor.
-> Update the matching entry in the same commit as any code change.
+> Verified vs commit b65ef68 + UX Workflow sprint. APPEND-ONLY: never remove entries or
+> restructure until the user explicitly orders a refactor. Update the matching entry in
+> the same commit as any code change.
 
 ## 1. STACK & BUILD
 React 19.2.8 · Vite 8.1.5 · Tailwind 3.4.17 · lucide-react · react-markdown+gfm · idb 8.0.1.
@@ -9,55 +9,46 @@ Entry index.html → main.jsx (StrictMode) → App.jsx. BASE_URL (utils/auth.js)
 
 ## 2. VIEW STATE MACHINE (App.jsx)
 landing → auth (requireAuth) · library → details (handleOpenStory) · storySetup → StoryCreator(create) · storyEdit → StoryCreator(edit) · default = chat layout (Sidebar+header+HUD+ChatWindow+ChatInput).
+SHARE DEEP-LINK: App reads ?story=<id> on boot (after auth), fetches GET /stories/{id}, opens details, cleans the URL.
 
 ## 3. PAGES & ELEMENTS → BACKEND CALLS
-- LandingPage: Quick Chat card → requireAuth("chat"); Story Forge card ("Under Development" badge, cosmetic) → requireAuth("story"); Sign In/Sign out.
-- AuthPage: POST /api/auth/login|signup (15s timeout; one auto-retry on abort/Failed-to-fetch; signup 409-after-retry → auto login); remember_me → localStorage vs sessionStorage via saveAuth.
-- StoryLibrary: tabs All/Mine/History. Loads GET /api/stories?scope=all|mine + GET /api/playthroughs + GET /api/stories/art (map {id:{cover,banner}} flattened). Cards: cover img, genre chip, owner-only Art upload (canvas 640px → POST /api/stories/{id}/art {image}), "by {creator_name}", Played/New/Day. Card click → onOpenStory(full payload: id, creator_id/name, is_public, played_count, ...).
-- StoryDetails: ALWAYS fetches GET /api/stories/{id} (card payloads lack image columns). Renders banner (banner_image||cover_image), genre/public/private chips, starter_location chip, tone line, premise, cast cards WITH portraits (c.image), Continue/Begin Journey → POST via handleStartJourney, author-only Edit → storyEdit.
-- StoryCreator: 3 steps. 1) World: title, genre (9), premise, starterLocation, tone, Public/Private toggle, cover+banner ImageFields (utils/art.js fileToDataUrl). 2) Protagonist: name/role/background/portrait; edit mode allows character edits (note: new journeys only). 3) Review + Save. Create → POST /api/stories (full payload). Edit → PATCH /api/stories/{id} (full payload via App.handleUpdateStory passthrough).
-- Chat layout: header (Home, title/Day, Flag end-journey double-tap → POST /playthroughs/{pt}/complete, Settings), error/notice banners, completed banner, HUD, ChatWindow, ChatInput.
-- HUD: HP bar Health/MaxHealth, MP bar Mana/MaxMana (defaults 100/50), stat chips, location chip → StoryMap; buttons: WorldCodex, CharacterSheet, StoryMap, InventoryPanel(count).
-- InventoryPanel: fetchInventory (cache-first); Abilities / Equipped (Unequip) / Carried (name ×qty, Equip/Use/Drop) via optimistic api helpers + HUD_ACTION.
-- StoryMap: fetchMap; journey line + detail (description, visits, discovered, last visited).
-- CharacterSheet: stats (+gear bonuses), abilities, equipped.
-- WorldCodex: GET world-nodes + world-events; groups powers/places/people; status tone chips; chronicle.
+- LandingPage: Quick Chat / Story Forge cards; Sign In/Out.
+- AuthPage: POST /auth/login|signup (15s timeout, one retry, 409→auto-login).
+- StoryLibrary: tabs All/Mine/History. Loads GET /stories?scope=all|mine + /playthroughs + /stories/art + /stories/social (5 parallel). UX: search (title/premise), genre chips, sort (recent/played/az), skeleton loaders, Recently Played shelf (All tab), onboarding nudge (localStorage inkmind_onboarded), owner Art upload → POST /stories/{id}/art {image} + toast. Card payload: id/title/genre/premise/character_*/creator_id/creator_name/is_public/played_count/current_day/time_of_day/playthrough_id. Cards show cover, ♥ likes, 💬 comments.
+- StoryDetails: fetch GET /stories/{id} + /stories/{id}/social. Renders banner (banner_image||cover_image), genre/public/starter_location chips, tone, premise, cast (tap-to-expand backgrounds, portraits), Like toggle (POST /like), Comments (POST/DELETE /comments), author-only Edit + Delete (DELETE /stories/{id}, double-tap), Share (copies ?story=<id> link) + toasts. Continue/Begin Journey → onStartJourney.
+- StoryCreator: 3 steps (World: title/genre/premise/starterLocation/tone/visibility/cover/banner · Protagonist: name/role/background/portrait · Review). Create → POST /stories; Edit → PATCH /stories/{id}. Character locked in edit mode.
+- Chat layout: header (Home/end-journey flag/Settings), error/notice banners, completed banner, HUD, ChatWindow, ChatInput.
+- HUD: HP/MP bars (Health/MaxHealth, Mana/MaxMana defaults 100/50), stat chips, location → StoryMap; buttons WorldCodex/CharacterSheet/StoryMap/InventoryPanel.
+- InventoryPanel: fetchInventory (cache-first); Abilities/Equipped/Carried (×qty, Equip/Use/Drop) optimistic + HUD_ACTION.
+- StoryMap: fetchMap; journey line + detail.
+- CharacterSheet: stats + gear bonuses, abilities, equipped.
+- WorldCodex: GET world-nodes + world-events; groups powers/places/people; chronicle.
 
 ## 4. UTILS
-api.js: runStream (SSE; 429 retry once w/ Retry-After clamp 1–10s; synthetic done on silent EOF), streamChat/streamStory, fetchInventory/fetchMap (IndexedDB-first + SYNC_HUD), equip/unequip/use/drop (optimistic + HUD_ACTION), completePlaythrough, compressMemory.
+api.js: runStream (SSE; one 429 retry w/ Retry-After; synthetic done on silent EOF), streamChat/streamStory, fetchInventory/fetchMap (IndexedDB-first + SYNC_HUD), optimistic equip/unequip/use/drop, completePlaythrough, compressMemory.
 auth.js: BASE_URL, token storage, authHeaders, parseJsonSafe, friendlyHttp, describeNetworkError, withTelemetry, fetchMe, postAuth.
+toast.js + Toaster.jsx: global toast bus (success/error/info, 3.5s auto-dismiss). Toaster mounted in StoryLibrary & StoryDetails.
 telemetry.js: device/geo payload (ipwho.is, silent-fail).
-storage.js: localStorage quick-chat sessions (glm_chat_data) + settings (glm_chat_settings).
+storage.js: localStorage quick-chat (glm_chat_data) + settings (glm_chat_settings).
 models.js: glm-4.7-flash="InkMind Nova", glm-4.5-flash="InkMind Pulse" (ids never shown).
-localDb.js: IndexedDB inkmind_local v3 — user_session, stories, playthroughs, messages(idx session_id/playthrough_id), library_feed, hud_cache(idx playthrough_id), world_nodes(idx playthrough_id/parent_id); clearLocalDB on logout.
-hudStore.js: cache getters/setters, optimisticItemAction, applyStateUpdateToCache, getCachedStoryContext.
-syncQueue.js: FIFO + signature dedupe + offline pause + requestIdleCallback. Processors: SYNC_LIBRARY, FETCH_STORY_DETAILS, FETCH_PLAYTHROUGH, FETCH_MESSAGES, COMPRESS_MEMORY, SYNC_HUD(inventory|map), HUD_ACTION, SYNC_WORLD_NODES. NEVER imports api.js.
-art.js: fetchStoriesArt, fetchCast, fetchPrologue, uploadStoryArt{kind,data_url}, uploadCharacterArt{data_url}, fileToDataUrl(640px, q0.82, 8MB cap).
+localDb.js: IndexedDB inkmind_local v3 — user_session, stories, playthroughs, messages(idx), library_feed, hud_cache(idx playthrough_id), world_nodes(idx playthrough_id/parent_id); clearLocalDB on logout.
+hudStore.js: cache getters/setters, optimisticItemAction, applyStateUpdateToCache.
+syncQueue.js: FIFO + signature dedupe + offline pause. Processors SYNC_LIBRARY/FETCH_STORY_DETAILS/FETCH_PLAYTHROUGH/FETCH_MESSAGES/COMPRESS_MEMORY/SYNC_HUD(inventory|map)/HUD_ACTION/SYNC_WORLD_NODES. NEVER imports api.js.
+art.js: fetchStoriesArt/fetchCast/fetchPrologue/uploadStoryArt/uploadCharacterArt/fileToDataUrl.
 
 ## 5. SSE state_update HANDLING (App.jsx)
-clean_content → bubble; rejected → notice; LOCATION_UPDATE → current_location; STAT_UPDATE → delta-additive + clampStat (Health 0..MaxHealth, Mana 0..MaxMana, Max* 1..999, others 0..999) — FE-BUG-1 RESOLVED; ITEM_UPDATE → inventory mirror; ABILITY_UPDATE → abilities mirror; then applyStateUpdateToCache + SYNC_HUD(inventory, world); done → COMPRESS_MEMORY.
+clean_content → bubble; rejected → notice; LOCATION_UPDATE → current_location; STAT_UPDATE → delta-additive + clampStat (Health 0..MaxHealth, Mana 0..MaxMana, Max* 1..999, others 0..999) — FE-BUG-1 RESOLVED; ITEM/ABILITY_UPDATE → metadata mirrors; then applyStateUpdateToCache + SYNC_HUD(inventory, world); done → COMPRESS_MEMORY.
 
 ## 6. UI → BACKEND INDEX
-Boot GET /health + /auth/me · auth POST /auth/* · library GET /stories, /playthroughs, /stories/art · details GET /stories/{id} · create POST /stories · edit PATCH /stories/{id} (+ PATCH /stories/{id}/characters/{cid}, POST .../art, POST .../characters/{cid}/art available) · journey POST /stories/{id}/play · turn POST /stories/{id}/continue · HUD GET inventory|map|world-nodes|world-events · actions POST equip|unequip|use|drop|complete|compress · chat POST /chat/stream · art.js GET /art/stories, /stories/{id}/cast.
+Boot GET /health + /auth/me · auth POST /auth/* · library GET /stories, /playthroughs, /stories/art, /stories/social · deep-link & details GET /stories/{id} · social GET /stories/{id}/social, POST /stories/{id}/like, POST|DELETE /stories/{id}/comments · create POST /stories · edit PATCH /stories/{id} · delete DELETE /stories/{id} · art POST /stories/{id}/art · journey POST /stories/{id}/play · turn POST /stories/{id}/continue · HUD GET inventory|map|world-nodes|world-events · actions POST equip|unequip|use|drop|complete|compress · chat POST /chat/stream.
 
 ## 7. DISCREPANCY LEDGER (append-only; mark RESOLVED, never delete)
 - FE-BUG-1 HUD -10/100 on damage — RESOLVED (clampStat + delta-additive).
 - FE-BUG-2 SYNC_HUD key 'world' enqueued but processor has no 'world' branch (no-op; WorldCodex fetches fresh on open) — OPEN.
-- A-3/B-1 art.js endpoints missing — RESOLVED (all routes exist).
+- A-3/B-1 art.js endpoints — RESOLVED (all routes exist).
 - DOC-1 README.md still describes legacy GLM Chat /sessions — OPEN.
-- A-4 LandingPage "Under Development" badge stale — OPEN (cosmetic).
+- A-4 LandingPage "Under Development" badge on Story Forge is stale — OPEN (cosmetic).
+- UX-1 Search/filter/sort, Recently Played, skeletons, toasts, share deep-link, onboarding — RESOLVED (this sprint, frontend-only).
 
 ## 8. MAINTENANCE RULES
 New component → §3 entry + §6 for its calls. New util → §4. New IndexedDB store → bump DB_VERSION + §4. Any backend call here must exist in BACKEND_MASTER §5 first.
-
-## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
-- StoryDetails.jsx (v2): like button (toggle + count, pink when liked) via POST /api/stories/{id}/like; Reader Comments section (list newest-first, input+send, delete own comments) via GET/POST/DELETE .../social, .../comments; cast cards are now TAP-TO-EXPAND (full background on tap, "Read more ▾" hint); author-only DELETE button in header (double-tap confirm → DELETE /api/stories/{id} → back to library). Full premise + backgrounds + tone + starter-location chips remain.
-- StoryLibrary.jsx (v2): 5th parallel fetch GET /api/stories/social → {story_id: {likes, comments}}; cards show ♥ likes and 💬 comments counts when > 0.
-- App.jsx contract UNCHANGED (StoryDetails props: story, user, onBack, onStartJourney, onEdit).
-- UX rules kept: 44px targets, touch-manipulation, confirm-before-destructive (same pattern as end-journey flag).
-
-## ADDENDUM — SOCIAL & DELETE SPRINT (2026-08-17)
-- StoryDetails.jsx (v2): like button (toggle + count, pink when liked) via POST /api/stories/{id}/like; Reader Comments section (list newest-first, input+send, delete own comments) via GET/POST/DELETE .../social, .../comments; cast cards are now TAP-TO-EXPAND (full background on tap, "Read more ▾" hint); author-only DELETE button in header (double-tap confirm → DELETE /api/stories/{id} → back to library). Full premise + backgrounds + tone + starter-location chips remain.
-- StoryLibrary.jsx (v2): 5th parallel fetch GET /api/stories/social → {story_id: {likes, comments}}; cards show ♥ likes and 💬 comments counts when > 0.
-- App.jsx contract UNCHANGED (StoryDetails props: story, user, onBack, onStartJourney, onEdit).
-- UX rules kept: 44px targets, touch-manipulation, confirm-before-destructive (same pattern as end-journey flag).

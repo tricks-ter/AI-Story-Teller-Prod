@@ -71,6 +71,29 @@ export default function App() {
     }
   }, []);
 
+  // SHARE DEEP-LINK: /?story=<id> opens the story details page directly.
+  useEffect(() => {
+    let sid = null;
+    try { sid = new URLSearchParams(window.location.search).get('story'); } catch {}
+    if (!sid || !user) return;
+    try { window.history.replaceState({}, '', window.location.pathname); } catch {}
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/stories/${sid}`, { headers: authHeaders() });
+        const data = await parseJsonSafe(res);
+        if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
+        if (!alive) return;
+        setDetailsStory({ ...data.story, characters: data.characters || [] });
+        setView("details");
+      } catch (e) {
+        if (!alive) return;
+        setView("library");
+      }
+    })();
+    return () => { alive = false; };
+  }, [user?.id]);
+
   const refreshSessions = () => setSessions(listSessions());
 
   const handleSelectSession = (sessionId) => { setActiveSessionId(sessionId); setMessages(getMessages(sessionId)); setStreamingMsg(null); setStatusText(""); setError(null); setSidebarOpen(false); };
@@ -230,6 +253,7 @@ export default function App() {
       const data = await parseJsonSafe(res);
       if (!res.ok) throw new Error(friendlyHttp(res.status, data?.detail));
       setEditingStory(null);
+      // Refresh detail page with updated data
       setDetailsStory(prev => prev && prev.id === storyId ? { ...prev, ...storyData } : prev);
       setView("details");
     } catch (err) {

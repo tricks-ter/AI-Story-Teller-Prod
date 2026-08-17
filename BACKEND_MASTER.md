@@ -77,3 +77,10 @@ New routes (all require_user):
 | DELETE /api/stories/{id}/comments/{cid} | U | delete_story_comment (comment author OR story author incl. legacy-claim) | StoryDetails |
 | DELETE /api/stories/{id} | U + can_manage_story | delete_story_full (FK CASCADE wipes characters/messages/notes/playthroughs/likes/comments) | StoryDetails |
 Guards unchanged otherwise. SSE pipeline unchanged.
+
+## ADDENDUM — UX WORKFLOW SPRINT (2026-08-17)
+Frontend-only sprint: library search/genre-filter/sort, Recently Played shelf, skeleton
+loaders, toast system, share deep-link (?story=<id>), onboarding nudge. NO backend or DB
+changes — search/sort/filter run client-side over already-loaded list data; the deep-link
+reuses the existing GET /api/stories/{id}; toasts/skeletons are pure UI. This contract is
+unchanged and remains authoritative. (See FRONTEND_MASTER §3/§6 for the new UI wiring.)
