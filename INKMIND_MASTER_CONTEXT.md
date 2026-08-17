@@ -188,3 +188,13 @@ narrated effect; N+1 queries in prompt assembly (perf note); no library search/f
 - 2026-08-11 Critical hotfix deployment: stat_resolver now treats "= -10" as delta (line 104), state_applier handles WORLD_STATE_UPDATE + WORLD_EVENT + stackable dedupe + ensure_world_node on LOCATION_UPDATE, db_ext gains banner editing + legacy claim + inventory dedupe + parent_id hierarchy, main.py gains PATCH /stories/{id} + banner field + dedupe_stackables call. Fixes: health no longer jumps to -10/100, coins stack instead of duplicate, world entities persist with hierarchy, banner editing works for all stories.
 
 - 2026-08-11 Detail review flow: new StoryDetails.jsx (banner, author, premise, cast, Continue/New Journey, author-only Edit); App.jsx now routes library clicks to details view before chat, handleStartJourney wraps the playthrough+chat setup; StoryLibrary passes creator_id/creator_name/played_count/is_public in card payloads; database.list_stories_for_user now returns creator_id + creator_name so My Creations tab shows author reliably.
+
+## 0.5 MASTER REFERENCE FILES (READ THESE TOO — mandatory)
+Before ANY task, read these three contracts in addition to this file:
+- FRONTEND_MASTER.md — every page/element and the exact backend call it makes
+- BACKEND_MASTER.md — every route, its db methods, tables, and frontend caller
+- DATABASE_MASTER.md — every table and the method→table matrix
+RULE: these files are append-only. Never remove entries or restructure them unless the user
+explicitly orders a refactor. When you add code, update the matching contract in the same commit.
+
+- 2026-08-13 Contracts sprint (verified vs commit f32ebcc): created three append-only master contracts — FRONTEND_MASTER.md, BACKEND_MASTER.md, DATABASE_MASTER.md. Discrepancy ledgers added: FE-BUG-1 (App.jsx STAT_UPDATE still assigns raw value → HUD -10/100; backend already fixed), FE-BUG-2 (SYNC_HUD key 'world' no-op), A-3/B-1 (utils/art.js targets endpoints that don't exist), B-2/D-1 (memory columns dormant vs metadata JSONB), B-4 (notes/visibility routes have no UI caller), B-6/D-2 (0008_story_indexes.sql missing from repo). All future sessions must read the three masters before coding and update them with every change.
