@@ -122,9 +122,6 @@ class VisibilityRequest(BaseModel):
 class ArtUpdateRequest(BaseModel):
     image: str = ""
     banner: str = ""
-    # utils/art.js compatibility: {kind, data_url}
-    kind: str = ""
-    data_url: str = ""
 
 class CharArtRequest(BaseModel):
     data_url: str = ""
@@ -405,7 +402,7 @@ def get_story_detail(story_id: str, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     check_story_access(story, user)
     chars = db.get_story_characters(story_id)
-    # Merge NPC portraits so the detail/edit UI can show them
+    # Merge cast portraits so the detail/edit UI can render them
     try:
         imgs = {c["id"]: (c.get("image") or "") for c in db_ext.get_cast_with_images(story_id)}
         for c in chars:
@@ -504,12 +501,6 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
     image = req.image or ""
     banner = req.banner or ""
-    # utils/art.js compatibility: {kind, data_url}
-    if req.data_url and req.data_url.startswith("data:image"):
-        if str(req.kind).lower() == "banner":
-            banner = req.data_url
-        else:
-            image = req.data_url
     if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
@@ -639,7 +630,6 @@ def create_new_story(request: StoryCreateRequest, raw: Request):
                     creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)
     db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
                            request.characterBackground, metadata=char_meta, telemetry=telemetry)
-    # Comprehensive creation: images (all validated client-side + here)
     if request.coverImage and _valid_data_url(request.coverImage):
         db_ext.set_story_art(story_id, request.coverImage)
     if request.bannerImage and _valid_data_url(request.bannerImage):

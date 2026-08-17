@@ -220,6 +220,7 @@ export default function App() {
 
   const handleUpdateStory = async (storyId, storyData) => {
     try {
+      // Pass the FULL payload through (title/genre/premise/images/visibility/starter/tone/character)
       const enriched = await withTelemetry(storyData);
       const res = await fetch(`${BASE_URL}/stories/${storyId}`, {
         method: "PATCH",

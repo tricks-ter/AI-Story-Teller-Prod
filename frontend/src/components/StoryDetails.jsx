@@ -76,7 +76,7 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
               ) : (
                 <span className="text-[10px] text-amber-400 flex items-center gap-1"><Lock size={10} /> Private</span>
               )}
-              {(meta.starter_location) && (
+              {meta.starter_location && (
                 <span className="text-[10px] text-blue-300 flex items-center gap-1"><MapPin size={10} /> {meta.starter_location}</span>
               )}
             </div>
