@@ -1,6 +1,6 @@
-# 🌌 InkMind — AI Narrative Engine & Story Teller
+# 🌌 LoreWeaver — AI Narrative Engine (by InkMind)
 
-> An advanced, interactive AI-driven narrative RPG system. InkMind allows users to create characters, define worlds, and embark on dynamic adventures guided by an AI Dungeon Master. Features deep state management, world memory, and real-time social interactions.
+> An advanced, interactive AI-driven narrative RPG system developed by **InkMind**. LoreWeaver allows users to create characters, define worlds, and embark on dynamic adventures guided by an AI Dungeon Master. Features deep state management, world memory, and real-time social interactions.
 
 ![Version](https://img.shields.io/badge/version-2.0.0-purple.svg)
 ![React](https://img.shields.io/badge/React-19-blue.svg)
