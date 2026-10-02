@@ -5,6 +5,7 @@ import uuid
 import logging
 from datetime import datetime, timezone
 import psycopg2
+from psycopg2 import pool, extras
 try:
     from dotenv import load_dotenv
     load_dotenv()
