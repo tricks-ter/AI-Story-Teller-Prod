@@ -124,6 +124,16 @@ class Database:
         row = self.execute_query("SELECT 1", fetch="one")
         if row is None:
             logger.warning("DB not reachable at boot.")
+            return
+            
+        logger.info("DB reachable. Ensuring schema is up to date...")
+        try:
+            import migrate
+            # Running migrations automatically on boot
+            migrate.main()
+            logger.info("Schema is up to date.")
+        except Exception as e:
+            logger.error(f"Migration failed during boot: {e}")
 
     @staticmethod
     def backpack_capacity(level):
