@@ -3,7 +3,7 @@
   "outputDirectory": "frontend/dist",
   "functions": {
     "api/main.py": {
-      "includeFiles": "api/**/*",
+      "includeFiles": "{api/**/*,migrations/**/*}",
       "maxDuration": 60,
       "memory": 1024
     }
