@@ -598,7 +598,7 @@ New component → §3 entry + §6 for its calls. New util → §4. New IndexedDB
 2. Source of truth = the GitHub repo. Fetch any file before editing; NEVER assume contents.
    Repo: https://github.com/tricks-ter/AI-Story-Teller-Prod (branch main)
    Raw pattern: https://raw.githubusercontent.com/tricks-ter/AI-Story-Teller-Prod/main/<path>
-   Live site: https://inkmind.tech
+   Live site: https://loreweaver.inkmind.tech
 3. Read sections 2, 5, 6 BEFORE writing code.
 4. Current status: Phase 5 complete (see section 9). Next work: Phase 6 (section 11).
 
