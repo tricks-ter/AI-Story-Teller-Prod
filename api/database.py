@@ -5,11 +5,14 @@ import uuid
 import logging
 from datetime import datetime, timezone
 import psycopg2
-from psycopg2 import extras
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-load_dotenv()
 logger = logging.getLogger(__name__)
+
 
 LEGACY_USER_ID = "legacy-system"
 
@@ -37,7 +40,13 @@ class Database:
             separator = "&" if "?" in self.database_url else "?"
             self.database_url += f"{separator}sslmode=require"
         self._conn = None
+        self._pool = None
         self._lock = threading.RLock()
+        if self.database_url:
+            try:
+                self._pool = pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=self.database_url, connect_timeout=5)
+            except Exception as e:
+                logger.warning(f"ThreadedConnectionPool init failed, using fallback connection: {e}")
 
     def _get_conn(self):
         if not self.database_url: return None
@@ -59,6 +68,25 @@ class Database:
 
     def _with_conn(self, fn, commit=False):
         if not self.database_url: return None
+        if self._pool:
+            conn = None
+            try:
+                conn = self._pool.getconn()
+                with conn.cursor(cursor_factory=extras.RealDictCursor) as cur:
+                    result = fn(cur)
+                if commit: conn.commit()
+                return result
+            except Exception as e:
+                if conn:
+                    try: conn.rollback()
+                    except Exception: pass
+                logger.error(f"DB Query error (pool): {e}")
+                return None
+            finally:
+                if conn and self._pool:
+                    try: self._pool.putconn(conn)
+                    except Exception: pass
+
         with self._lock:
             last_err = None
             for attempt in range(2):
@@ -79,6 +107,7 @@ class Database:
                     break
             logger.error(f"DB Query error: {last_err}")
             return None
+
 
     def execute_query(self, query, params=None, fetch="all", commit=False):
         def fn(cur):
@@ -347,10 +376,16 @@ class Database:
     def create_playthrough(self, story_id, user_id):
         pid = str(uuid.uuid4())
         def fn(cur):
+            cur.execute("SELECT metadata FROM stories WHERE id = %s", (story_id,))
+            srow = cur.fetchone()
+            smeta = (srow["metadata"] if srow and isinstance(srow["metadata"], dict) else {}) or {}
+            starter_loc = smeta.get("starter_location") or ""
+            pt_meta = {"current_location": starter_loc} if starter_loc else {}
+
             cur.execute(
                 "INSERT INTO playthroughs (id, story_id, user_id, current_day, time_of_day, status, metadata, created_at, updated_at) "
-                "VALUES (%s, %s, %s, 1, 'Morning', 'active', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                (pid, story_id, user_id))
+                "VALUES (%s, %s, %s, 1, 'Morning', 'active', %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (pid, story_id, user_id, json.dumps(pt_meta)))
             cur.execute(
                 "INSERT INTO playthrough_characters (id, playthrough_id, character_name, role, background, is_player, metadata, created_at) "
                 "SELECT substr(md5(random()::text || sc.id), 1, 36), %s, sc.name, sc.role, sc.background, sc.is_player, sc.metadata, CURRENT_TIMESTAMP "
@@ -366,9 +401,25 @@ class Database:
                 "SELECT substr(md5(random()::text || pc.id), 1, 36), %s, pc.id, 1, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
                 "FROM playthrough_characters pc WHERE pc.playthrough_id = %s",
                 (pid, pid))
+
+            if starter_loc:
+                loc_id = str(uuid.uuid4())
+                cur.execute(
+                    "INSERT INTO locations (id, playthrough_id, name, description, is_current, visit_count, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, TRUE, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (playthrough_id, LOWER(name)) DO NOTHING",
+                    (loc_id, pid, starter_loc, f"Starting region of the saga: {starter_loc}."))
+                node_id = str(uuid.uuid4())
+                cur.execute(
+                    "INSERT INTO world_nodes (id, playthrough_id, parent_id, node_type, name, metadata, status, is_alive, relationship, wealth, power, allegiance, created_at, updated_at) "
+                    "VALUES (%s, %s, NULL, 'settlement', %s, %s, 'stable', TRUE, 0, 0, 50, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (playthrough_id, LOWER(name)) DO NOTHING",
+                    (node_id, pid, starter_loc, json.dumps({"description": f"Starting region: {starter_loc}"})))
+
             cur.execute("SELECT * FROM playthroughs WHERE id = %s", (pid,))
             return cur.fetchone()
         return self._with_conn(fn, commit=True)
+
 
     def get_playthrough_characters(self, playthrough_id):
         return self.execute_query(
@@ -768,7 +819,7 @@ class Database:
                 (character_id, character_id))
             used = int(cur.fetchone()["used"])
 
-            cur.execute("SELECT item_id FROM playthrough_equipment WHERE character_id = %s AND slot = %s", (character_id, slot))
+            cur.execute("SELECT id, item_id FROM playthrough_equipment WHERE character_id = %s AND slot = %s", (character_id, slot))
             old = cur.fetchone()
             old_weight = 0
             if old:
@@ -781,6 +832,7 @@ class Database:
 
             if old:
                 cur.execute("DELETE FROM playthrough_equipment WHERE id = %s", (old["id"],))
+
             cur.execute(
                 "INSERT INTO playthrough_equipment (id, playthrough_id, character_id, item_id, slot, created_at) "
                 "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",

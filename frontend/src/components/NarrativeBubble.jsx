@@ -1,9 +1,9 @@
 import React from 'react';
 
-// Split narrative text into dialogue (in "quotes") vs narration segments.
+// Split narrative text into dialogue (in "quotes" or “curly quotes”) vs narration segments.
 export function splitNarrative(text) {
   const segments = [];
-  const regex = /"([^"\n]*)"/g;
+  const regex = /["“]([^"”\n]*)["”]/g;
   let last = 0, m;
   while ((m = regex.exec(text)) !== null) {
     if (m.index > last) segments.push({ type: 'narration', text: text.slice(last, m.index) });
@@ -13,6 +13,7 @@ export function splitNarrative(text) {
   if (last < text.length) segments.push({ type: 'narration', text: text.slice(last) });
   return segments;
 }
+
 
 export default function NarrativeBubble({ message, isStreaming }) {
   const isUser = message.role === 'user';

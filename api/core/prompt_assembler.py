@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(BASE_DIR)
@@ -15,6 +17,11 @@ class PromptAssembler:
         self.playthrough_id = playthrough_id
         self.max_chars = max_chars
 
+    @staticmethod
+    def sanitize_user_action(user_action: str) -> str:
+        if not user_action: return ""
+        return re.sub(r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|WORLD_STATE_UPDATE|WORLD_EVENT|SAGA_END)[^\]]*\]', '', user_action).strip()
+
     def assemble_full_prompt(self, user_action: str) -> str:
         pt = db.get_playthrough(self.playthrough_id)
         if not pt:
@@ -22,6 +29,9 @@ class PromptAssembler:
         story = db.get_story(pt["story_id"])
         if not story:
             return "You are a helpful assistant."
+
+        # Sanitize user_action to strip prompt injection tags
+        sanitized_action = self.sanitize_user_action(user_action)
 
         state = db.get_full_playthrough_state(self.playthrough_id)
         characters = state["characters"]
@@ -184,7 +194,16 @@ Time of Day: {pt['time_of_day']}
                 context += f"- {entry.get('title', 'Lore')}: {entry.get('content', '')}\n"
             context += "\n"
 
-        for m in messages:
+        # Sanitize user_action to strip prompt injection tags
+        sanitized_action = self.sanitize_user_action(user_action)
+
+
+        # Exclude the latest user action if it was already inserted into messages history
+        prior_messages = messages
+        if prior_messages and prior_messages[-1]["role"] == "user" and prior_messages[-1]["content"].strip() == user_action.strip():
+            prior_messages = prior_messages[:-1]
+
+        for m in prior_messages:
             role = "Player" if m["role"] == "user" else "Narrator"
             context += f"{role}: {m['content']}\n"
             
@@ -197,6 +216,7 @@ Time of Day: {pt['time_of_day']}
             for n in notes:
                 director += f"- {n['content']}\n"
 
-        action = f"\n[PLAYER'S CURRENT ACTION]\n{user_action}\n\nRespond with clear, immersive narrative prose. Stop before the outcome."
+        action = f"\n[PLAYER'S CURRENT ACTION]\n{sanitized_action}\n\nRespond with clear, immersive narrative prose. Stop before the outcome."
 
         return system + world + context + director + action
+

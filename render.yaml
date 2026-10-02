@@ -1,18 +1,19 @@
 services:
   - type: web
-    name: glm-chat-api
+    name: inkmind-api
     runtime: python
     region: oregon
     plan: free
     rootDir: api
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ZAI_API_KEY
         sync: false        # Set this manually in the Render dashboard
+      - key: DATABASE_URL
+        sync: false        # Set Neon / Render Postgres connection string
+      - key: ALLOWED_ORIGINS
+        sync: false        # e.g. https://inkmind.tech
       - key: PYTHON_VERSION
         value: 3.12.3
-    disk:
-      name: chat-data
-      mountPath: /opt/render/project/src
-      sizeGB: 1
+

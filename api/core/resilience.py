@@ -70,11 +70,12 @@ def extract_retry_after(exc):
     return None
 
 def backoff_delay(attempt, retry_after=None, base=0.8, cap=8.0):
-    """Exponential backoff with full jitter; honors Retry-After when present."""
+    """Exponential backoff with jitter; honors Retry-After when present."""
     if retry_after:
         return retry_after + random.uniform(0.0, 0.5)
     exp = min(cap, base * (2 ** attempt))
-    return exp * (0.5 + random.random())
+    return random.uniform(0.5 * exp, exp)
+
 
 def call_with_retry(fn, max_attempts=3, label="zai"):
     """Run fn(); retry retryable upstream errors with jittered backoff.

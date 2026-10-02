@@ -20,6 +20,16 @@ function persistChats(data) {
   }
 }
 
+export function safeUUID() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
 export function listSessions() {
   const { sessions } = loadChats();
   return Object.values(sessions).sort(
@@ -28,7 +38,7 @@ export function listSessions() {
 }
 
 export function createSession() {
-  const id = crypto.randomUUID();
+  const id = safeUUID();
   const now = new Date().toISOString();
   const session = {
     session_id: id,
@@ -36,6 +46,7 @@ export function createSession() {
     title: "New Chat",
     messages: [],
   };
+
   const data = loadChats();
   data.sessions[id] = session;
   persistChats(data);

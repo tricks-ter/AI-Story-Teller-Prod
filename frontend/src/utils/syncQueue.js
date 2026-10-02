@@ -155,8 +155,16 @@ class FIFOQueue {
               detail: { storyId, kind: 'comment', tempId: payload.tempId }
             }));
             try { toast.error('Comment could not be posted'); } catch {}
+          } else {
+            const data = await parseJsonSafe(res);
+            if (data?.id) {
+              window.dispatchEvent(new CustomEvent('inkmind-social-comment-added', {
+                detail: { storyId, tempId: payload.tempId, realId: data.id }
+              }));
+            }
           }
         } else if (action === 'comment_delete') {
+
           const res = await fetch(`${BASE_URL}/stories/${storyId}/comments/${payload.commentId}`, {
             method: 'DELETE',
             headers: authHeaders()
@@ -184,7 +192,11 @@ class FIFOQueue {
     const exists = this.queue.some(t => `${t.type}:${JSON.stringify(t.payload)}` === signature);
     if (exists) return;
 
-    this.queue.push({ id: crypto.randomUUID(), type, payload, priority, attempts: 0, signature });
+    const id = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") 
+      ? crypto.randomUUID() 
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    this.queue.push({ id, type, payload, priority, attempts: 0, signature });
     this._processNext();
   }
 
@@ -192,7 +204,8 @@ class FIFOQueue {
     if (this.processing || this.queue.length === 0 || !navigator.onLine) return;
     this.processing = true;
 
-    this.queue.sort((a, b) => (a.priority === 'high' ? -1 : 1));
+    const pRank = { high: 2, normal: 1, low: 0 };
+    this.queue.sort((a, b) => (pRank[b.priority] || 1) - (pRank[a.priority] || 1));
     const task = this.queue.shift();
     this.activeTasks.add(task.signature);
 
@@ -202,6 +215,10 @@ class FIFOQueue {
       }
     } catch (e) {
       console.warn(`[SyncQueue] Task ${task.type} failed.`, e);
+      if ((task.attempts || 0) < 3) {
+        task.attempts = (task.attempts || 0) + 1;
+        this.queue.push(task);
+      }
     } finally {
       this.activeTasks.delete(task.signature);
     }
@@ -214,6 +231,7 @@ class FIFOQueue {
       setTimeout(() => this._processNext(), 50);
     }
   }
+
 }
 
 export const syncQueue = new FIFOQueue();

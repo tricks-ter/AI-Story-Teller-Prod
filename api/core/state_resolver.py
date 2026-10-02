@@ -17,12 +17,12 @@ def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
       [WORLD_EVENT: EntityName | type=war|politics|economy|personal, desc=...]
       [SAGA_END]
     """
-    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|WORLD_STATE_UPDATE|WORLD_EVENT|SAGA_END):\s*([^\]]*)\]'
+    pattern = r'\[(TIME_UPDATE|STAT_UPDATE|LOCATION_UPDATE|ITEM_UPDATE|ABILITY_UPDATE|BAG_UPDATE|WORLD_STATE_UPDATE|WORLD_EVENT|SAGA_END)(?::\s*([^\]]*))?\]'
     updates = []
 
     def replacer(match):
         tag_type = match.group(1)
-        payload = match.group(2).strip()
+        payload = (match.group(2) or "").strip()
         parsed = _parse_payload(tag_type, payload)
         if parsed:
             updates.append(parsed)
@@ -34,22 +34,43 @@ def resolve_state(raw_text: str) -> Tuple[str, List[Dict[str, Any]]]:
 def _parse_attrs(raw: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     bonuses: Dict[str, float] = {}
-    for part in raw.split(","):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        k = k.strip().lower(); v = v.strip()
-        if k.startswith("bonus."):
-            try:
-                bonuses[k.split(".", 1)[1].strip()] = float(v)
-            except Exception:
-                pass
-        elif k in ("desc", "description"):
-            out["description"] = v
-        else:
-            out[k] = v
+    matches = list(re.finditer(r'([a-zA-Z0-9_.]+)\s*=\s*(.*?)(?=(?:,\s*[a-zA-Z0-9_.]+\s*=|$))', raw))
+    if matches:
+        for m in matches:
+            k = m.group(1).strip().lower()
+            v = m.group(2).strip().rstrip(',')
+            if k.startswith("bonus."):
+                try:
+                    stat_key = k.split(".", 1)[1].strip()
+                    stat_key = {"health": "Health", "mana": "Mana", "maxhealth": "MaxHealth", "maxmana": "MaxMana"}.get(stat_key.lower(), stat_key.capitalize())
+                    bonuses[stat_key] = float(v)
+                except Exception:
+                    pass
+            elif k in ("desc", "description"):
+                out["description"] = v
+            else:
+                out[k] = v
+    else:
+        for part in raw.split(","):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            k = k.strip().lower(); v = v.strip()
+            if k.startswith("bonus."):
+                try:
+                    stat_key = k.split(".", 1)[1].strip()
+                    stat_key = {"health": "Health", "mana": "Mana", "maxhealth": "MaxHealth", "maxmana": "MaxMana"}.get(stat_key.lower(), stat_key.capitalize())
+                    bonuses[stat_key] = float(v)
+                except Exception:
+                    pass
+            elif k in ("desc", "description"):
+                out["description"] = v
+            else:
+                out[k] = v
+
     typed: Dict[str, Any] = {}
+
     if "type" in out: typed["type"] = out["type"].lower()
     if "slot" in out: typed["slot"] = out["slot"].lower()
     if "rarity" in out: typed["rarity"] = out["rarity"].lower()
@@ -88,12 +109,12 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
                 is_delta = right_s.startswith(("+", "-"))
                 value = float(right_s)
             else:
-                m = re.match(r'([\w\s\.]+)\s+([+-]?\d+(?:\.\d+)?)$', payload)
+                m = re.match(r'([\w\s\.\'\-]+)\s+([+-]?\d+(?:\.\d+)?)$', payload)
                 if not m: return None
                 char_stat = m.group(1).strip()
                 value = float(m.group(2))
                 is_delta = True
-            parts = char_stat.split(".", 1)
+            parts = char_stat.rsplit(".", 1)
             if len(parts) != 2: return None
             character, stat = parts
             return {"type": "STAT_UPDATE", "character": character.strip(), "stat": stat.strip(), "value": value, "is_delta": is_delta}
@@ -114,9 +135,18 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             if "|" in payload:
                 main_part, attr_part = payload.split("|", 1)
                 attrs = _parse_attrs(attr_part)
-            m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
-            if not m: return None
-            character = m.group(1).strip(); op = m.group(2); item = m.group(3).strip()
+            
+            # Match space-delimited + or - first to support hyphenated character names like Jean-Luc
+            m_space = re.search(r'\s+([+\-])\s+', main_part.strip())
+            if m_space:
+                character = main_part[:m_space.start()].strip()
+                op = m_space.group(1)
+                item = main_part[m_space.end():].strip()
+            else:
+                m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
+                if not m: return None
+                character = m.group(1).strip(); op = m.group(2); item = m.group(3).strip()
+
             if not character or not item: return None
             return {"type": "ITEM_UPDATE", "character": character, "add": op == "+", "item": item, "attrs": attrs}
 
@@ -126,9 +156,17 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
             if "|" in payload:
                 main_part, attr_part = payload.split("|", 1)
                 attrs = _parse_attrs(attr_part)
-            m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
-            if not m: return None
-            character = m.group(1).strip(); op = m.group(2); ability = m.group(3).strip()
+
+            m_space = re.search(r'\s+([+\-])\s+', main_part.strip())
+            if m_space:
+                character = main_part[:m_space.start()].strip()
+                op = m_space.group(1)
+                ability = main_part[m_space.end():].strip()
+            else:
+                m = re.match(r'^(.+?)\s*([+\-])\s*(.+)$', main_part.strip())
+                if not m: return None
+                character = m.group(1).strip(); op = m.group(2); ability = m.group(3).strip()
+
             if not character or not ability: return None
             return {"type": "ABILITY_UPDATE", "character": character, "add": op == "+", "ability": ability, "description": attrs.get("description", "")}
 
@@ -171,3 +209,4 @@ def _parse_payload(tag_type: str, payload: str) -> Dict[str, Any]:
     except Exception as e:
         return None
     return None
+

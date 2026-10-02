@@ -9,8 +9,14 @@ import json, logging, uuid
 from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import FastAPI, APIRouter, HTTPException, Request
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -34,7 +40,19 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="InkMind API", version="7.7.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+if not allowed_origins:
+    allowed_origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True if allowed_origins != ["*"] else False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 API_KEY = os.getenv("ZAI_API_KEY", "")
 DEFAULT_MODEL = "glm-4.7-flash"
@@ -80,6 +98,11 @@ class StoryCreateRequest(BaseModel):
     characterRole: str
     characterBackground: str
     isPublic: bool = True
+    starterLocation: Optional[str] = None
+    tone: Optional[str] = None
+    coverImage: Optional[str] = None
+    bannerImage: Optional[str] = None
+    characterImage: Optional[str] = None
     client_telemetry: Optional[dict] = None
 
 class StoryUpdateRequest(BaseModel):
@@ -88,6 +111,9 @@ class StoryUpdateRequest(BaseModel):
     premise: Optional[str] = None
     cover_image: Optional[str] = None
     banner_image: Optional[str] = None
+    is_public: Optional[bool] = None
+    starter_location: Optional[str] = None
+    tone: Optional[str] = None
 
 class AuthRequest(BaseModel):
     username: str
@@ -107,8 +133,16 @@ class VisibilityRequest(BaseModel):
     is_public: bool
 
 class ArtUpdateRequest(BaseModel):
-    image: str = ""
-    banner: str = ""
+    image: Optional[str] = ""
+    banner: Optional[str] = ""
+    kind: Optional[str] = None
+    data_url: Optional[str] = None
+
+class CharacterUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    background: Optional[str] = None
+    image: Optional[str] = None
 
 class LikeRequest(BaseModel):
     # Empty body = toggle (backward compatible). Explicit liked = idempotent set (queue-safe).
@@ -139,14 +173,15 @@ def get_bearer_token(raw: Request) -> Optional[str]:
 
 def check_story_access(story: dict, user: dict):
     owner = story.get("creator_id")
-    if owner and owner != user["id"] and owner != LEGACY_USER_ID:
-        raise HTTPException(status_code=403, detail="This saga belongs to another author")
-    if not story.get("is_public", True) and owner != user["id"]:
+    is_public = story.get("is_public", True)
+    # Private sagas can only be accessed by the creator or legacy system
+    if not is_public and owner != user["id"] and owner not in (None, "", LEGACY_USER_ID):
         raise HTTPException(status_code=403, detail="This saga is private")
 
 def require_story_owner(story: dict, user: dict):
-    if story.get("creator_id") != user["id"]:
+    if story.get("creator_id") != user["id"] and story.get("creator_id") not in (None, "", LEGACY_USER_ID):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+
 
 def ensure_playthrough(story_id: str, user: dict):
     pt = db.get_active_playthrough(story_id, user["id"])
@@ -293,21 +328,38 @@ def get_world_events_route(playthrough_id: str, raw: Request, limit: int = 20):
 def compress_memory(playthrough_id: str, raw: Request):
     from zai import ZaiClient
     user = require_user(raw)
-    require_own_playthrough(playthrough_id, user)
+    pt = require_own_playthrough(playthrough_id, user)
     msgs = db.get_playthrough_messages(playthrough_id, limit=200)
-    if len(msgs) <= 50:
+    if len(msgs) <= 30:
         return {"status": "skipped", "reason": "not_enough_messages", "count": len(msgs)}
-    oldest = msgs[:40]
-    transcript = "\n".join(f"{m['role']}: {m['content']}" for m in oldest)
+
+    meta = pt.get("metadata") or {}
+    last_compressed_count = int(meta.get("last_compressed_count", 0))
+    if len(msgs) - last_compressed_count < 20:
+        return {"status": "skipped", "reason": "already_compressed_recently", "count": len(msgs)}
+
+    batch = msgs[last_compressed_count : last_compressed_count + 40]
+    if not batch:
+        return {"status": "skipped", "reason": "no_new_batch"}
+
+    transcript = "\n".join(f"{m['role']}: {m['content']}" for m in batch)
     if not API_KEY:
         raise HTTPException(status_code=500, detail="ZAI_API_KEY missing.")
     client = ZaiClient(api_key=API_KEY)
+
+    existing_summary = meta.get("memory_summary", "")
+    system_prompt = "Summarize this RPG chapter chronicle into a compact memory (max 250 words). Keep key decisions, names, places, and relationships."
+    if existing_summary:
+        user_prompt = f"Previous Memory:\n{existing_summary}\n\nNew Chapter Chronicle:\n{transcript}\n\nProvide an integrated updated memory summary."
+    else:
+        user_prompt = transcript
+
     resp = call_with_retry(
         lambda: client.chat.completions.create(
             model="glm-4.5-flash",
             messages=[
-                {"role": "system", "content": "Summarize this RPG chapter chronicle into a compact memory (max 250 words). Keep names, places, outcomes and relationships."},
-                {"role": "user", "content": transcript},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
             max_tokens=600, temperature=0.3),
         max_attempts=2, label="compress")
@@ -315,7 +367,19 @@ def compress_memory(playthrough_id: str, raw: Request):
     if not summary:
         raise HTTPException(status_code=502, detail="Summarizer returned empty text.")
     db_ext.set_memory_summary(playthrough_id, summary)
-    return {"status": "compressed", "messages": len(msgs)}
+
+    def fn(cur):
+        cur.execute("SELECT metadata FROM playthroughs WHERE id = %s", (playthrough_id,))
+        row = cur.fetchone()
+        if row:
+            rmeta = (row["metadata"] if isinstance(row["metadata"], dict) else {}) or {}
+            rmeta["last_compressed_count"] = last_compressed_count + len(batch)
+            cur.execute("UPDATE playthroughs SET metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (json.dumps(rmeta), playthrough_id))
+        return True
+    db._with_conn(fn, commit=True)
+
+    return {"status": "compressed", "messages": len(msgs), "compressed_up_to": last_compressed_count + len(batch)}
 
 @router.post("/playthroughs/{playthrough_id}/equip")
 def equip_item(playthrough_id: str, req: ItemActionRequest, raw: Request):
@@ -383,6 +447,59 @@ def get_story_detail(story_id: str, raw: Request):
         pass
     return {"story": story, "characters": chars}
 
+@router.delete("/stories/{story_id}")
+def delete_story(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can delete this saga")
+    if not db_ext.delete_story_full(story_id):
+        raise HTTPException(status_code=500, detail="Could not delete story")
+    return {"status": "deleted", "story_id": story_id}
+
+@router.get("/art/stories")
+def get_art_stories(ids: str = "", raw: Request = None):
+    id_list = [i.strip() for i in ids.split(",") if i.strip()]
+    if not id_list:
+        return db_ext.get_all_story_art()
+    return db_ext.get_story_art_by_ids(id_list)
+
+@router.get("/stories/{story_id}/cast")
+def get_story_cast(story_id: str, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    check_story_access(story, user)
+    return db_ext.get_cast_with_images(story_id)
+
+@router.post("/stories/{story_id}/characters/{char_id}/art")
+def upload_character_art(story_id: str, char_id: str, req: ArtUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can update character art")
+    image_url = req.data_url or req.image or ""
+    if image_url and len(image_url) > 900_000:
+        raise HTTPException(status_code=413, detail="Image too large.")
+    if not db_ext.set_character_image_by_id(story_id, char_id, image_url):
+        raise HTTPException(status_code=500, detail="Could not update character art")
+    return {"status": "updated", "character_id": char_id}
+
+@router.patch("/stories/{story_id}/characters/{char_id}")
+def update_character_route(story_id: str, char_id: str, req: CharacterUpdateRequest, raw: Request):
+    user = require_user(raw)
+    story = db.get_story(story_id)
+    if not story: raise HTTPException(status_code=404, detail="Story not found")
+    if not db_ext.can_manage_story(story, user["id"]):
+        raise HTTPException(status_code=403, detail="Only the author can update character details")
+    fields = req.model_dump(exclude_unset=True)
+    if not fields: return {"status": "nothing_to_update"}
+    if not db_ext.update_character_details(story_id, char_id, fields):
+        raise HTTPException(status_code=500, detail="Could not update character details")
+    return {"status": "updated", "character_id": char_id}
+
 @router.patch("/stories/{story_id}")
 def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
     user = require_user(raw)
@@ -407,6 +524,16 @@ def update_story(story_id: str, req: StoryUpdateRequest, raw: Request):
     if req.banner_image is not None:
         if len(req.banner_image) > 900_000: raise HTTPException(status_code=413, detail="Image too large.")
         fields["banner_image"] = req.banner_image
+    if req.is_public is not None:
+        fields["is_public"] = req.is_public
+
+    # Update metadata fields if starter_location or tone provided
+    if req.starter_location is not None or req.tone is not None:
+        smeta = (story.get("metadata") if isinstance(story.get("metadata"), dict) else {}) or {}
+        if req.starter_location is not None: smeta["starter_location"] = req.starter_location.strip()
+        if req.tone is not None: smeta["tone"] = req.tone.strip()
+        db.execute_query("UPDATE stories SET metadata = %s WHERE id = %s", (json.dumps(smeta), story_id), fetch="none", commit=True)
+
     if not fields:
         return {"status": "nothing_to_update"}
     if not db_ext.update_story_fields(story_id, fields):
@@ -420,8 +547,16 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
     if not story: raise HTTPException(status_code=404, detail="Story not found")
     if not db_ext.can_manage_story(story, user["id"]):
         raise HTTPException(status_code=403, detail="Only the author can manage this saga")
+    
     image = req.image or ""
     banner = req.banner or ""
+    if req.kind in ("cover", "portrait") and req.data_url:
+        image = req.data_url
+    elif req.kind == "banner" and req.data_url:
+        banner = req.data_url
+    elif req.data_url and not image and not banner:
+        image = req.data_url
+
     if len(image) > 900_000 or len(banner) > 900_000:
         raise HTTPException(status_code=413, detail="Image too large — pick a smaller picture.")
     if image and not image.startswith("data:image"):
@@ -433,93 +568,6 @@ def set_story_art(story_id: str, req: ArtUpdateRequest, raw: Request):
     if banner and not db_ext.set_story_banner(story_id, banner):
         raise HTTPException(status_code=500, detail="Could not save the banner. Try again.")
     return {"status": "updated"}
-
-@router.get("/stories/{story_id}/messages")
-def get_story_messages(story_id: str, raw: Request, limit: int = 50, base_only: bool = True):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    return db.get_story_messages(story_id, limit=min(max(int(limit), 1), 200), base_only=base_only)
-
-@router.get("/stories/{story_id}/notes")
-def get_story_notes(story_id: str, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    return db.list_story_notes_full(story_id)
-
-@router.post("/stories/{story_id}/notes")
-def create_story_note(story_id: str, req: NoteCreateRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
-    content = req.content.strip()
-    if not content or len(content) > 500:
-        raise HTTPException(status_code=400, detail="Note must be 1–500 characters")
-    note_id = db.add_story_note(story_id, content, priority=max(1, min(10, req.priority)))
-    if not note_id: raise HTTPException(status_code=500, detail="Could not save note")
-    return {"id": note_id, "status": "created"}
-
-@router.post("/stories/{story_id}/notes/{note_id}/toggle")
-def toggle_story_note(story_id: str, note_id: int, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
-    current = next((n for n in db.list_story_notes_full(story_id) if n["id"] == note_id), None)
-    if not current: raise HTTPException(status_code=404, detail="Note not found")
-    db.toggle_story_note(note_id, not current["is_active"])
-    return {"status": "toggled"}
-
-@router.delete("/stories/{story_id}/notes/{note_id}")
-def delete_story_note(story_id: str, note_id: int, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
-    db.delete_story_note(note_id)
-    return {"status": "deleted"}
-
-@router.post("/stories/{story_id}/visibility")
-def set_visibility(story_id: str, req: VisibilityRequest, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    require_story_owner(story, user)
-    db.set_story_visibility(story_id, req.is_public)
-    return {"status": "updated", "is_public": req.is_public}
-
-@router.post("/stories/{story_id}/play")
-def play_story(story_id: str, raw: Request):
-    user = require_user(raw)
-    story = db.get_story(story_id)
-    if not story: raise HTTPException(status_code=404, detail="Story not found")
-    check_story_access(story, user)
-    pt = ensure_playthrough(story_id, user)
-    db.ensure_playthrough_inventory(pt["id"])
-    return {"playthrough": pt, "story": story, "characters": db.get_playthrough_characters(pt["id"])}
-
-@router.post("/stories")
-def create_new_story(request: StoryCreateRequest, raw: Request):
-    user = require_user(raw)
-    story_id = str(uuid.uuid4())
-    char_id = str(uuid.uuid4())
-    story_meta = {
-        "system_prompt": f"You are a master storyteller in the {request.genre} genre.",
-        "rules": "Keep responses immersive and descriptive."
-    }
-    char_meta = {"stats": {"Health": 100, "MaxHealth": 100, "Mana": 50, "MaxMana": 50}, "inventory": ["Adventurer's Kit"]}
-    telemetry = request.client_telemetry
-    db.create_story(story_id, request.title, request.genre, request.premise, metadata=story_meta,
-                    creator_id=user["id"], telemetry=telemetry, is_public=request.isPublic)
-    db.add_story_character(char_id, story_id, request.characterName, request.characterRole,
-                           request.characterBackground, metadata=char_meta, telemetry=telemetry)
-    intro_msg = f"Welcome to {request.title}. You are {request.characterName}, a {request.characterRole}. {request.premise}"
-    db.add_story_message(story_id, "system", intro_msg, msg_type="intro", telemetry=telemetry)
-    return {"story_id": story_id, "status": "created", "title": request.title}
 
 @router.post("/stories/{story_id}/continue")
 async def continue_story(story_id: str, request: StoryContinueRequest, raw: Request):
@@ -588,7 +636,12 @@ async def continue_story(story_id: str, request: StoryContinueRequest, raw: Requ
         yield f"data: {json.dumps({'type': 'state_update', 'clean_content': clean_text, 'updates': result['applied'], 'rejected': result['rejected'], 'day': fresh['current_day'], 'time_of_day': fresh['time_of_day'], 'status': fresh['status']})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    sse_headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=sse_headers)
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest, raw: Request):
@@ -644,7 +697,12 @@ async def chat_stream(request: ChatRequest, raw: Request):
                            user_id=uid, telemetry=telemetry)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    sse_headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=sse_headers)
 
 # ── Social: likes & comments (any logged-in user on accessible sagas) ──
 @router.get("/stories/social")
@@ -688,8 +746,12 @@ def delete_comment(story_id: str, comment_id: int, raw: Request):
     user = require_user(raw)
     story = db.get_story(story_id)
     if not story: raise HTTPException(status_code=404, detail="Story not found")
+    existing = db.execute_query("SELECT user_id FROM story_comments WHERE id = %s AND story_id = %s", (comment_id, story_id), fetch="one")
+    if not existing:
+        raise HTTPException(status_code=404, detail="Comment not found")
     if not db_ext.delete_story_comment(comment_id, user["id"], story.get("creator_id")):
         raise HTTPException(status_code=403, detail="You can only delete your own comments")
     return {"status": "deleted"}
 
 app.include_router(router)
+

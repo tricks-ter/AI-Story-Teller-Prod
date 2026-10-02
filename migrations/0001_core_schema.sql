@@ -1,7 +1,3 @@
-INSERT INTO users (id, username, password_hash, role, metadata, created_at)
-VALUES ('legacy-system', 'legacy-system', '!', 'user', '{}'::jsonb, CURRENT_TIMESTAMP)
-ON CONFLICT (id) DO NOTHING;
-
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(36) PRIMARY KEY,
     username VARCHAR(80) UNIQUE NOT NULL,
@@ -9,6 +5,10 @@ CREATE TABLE IF NOT EXISTS users (
     role VARCHAR(20) NOT NULL DEFAULT 'user',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);
+
+INSERT INTO users (id, username, password_hash, role, metadata, created_at)
+VALUES ('legacy-system', 'legacy-system', '!', 'user', '{}'::jsonb, CURRENT_TIMESTAMP)
+ON CONFLICT (id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS auth_tokens (
     token VARCHAR(128) PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,

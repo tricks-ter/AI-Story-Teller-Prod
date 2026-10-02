@@ -5,10 +5,11 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-echo "[GLM Chat] Starting api on http://localhost:8000 ..."
+echo "[InkMind] Starting api on http://localhost:8000 ..."
 cd "$ROOT/api"
-~/.local/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!
+
 
 echo "[GLM Chat] Starting frontend on http://localhost:5173 ..."
 cd "$ROOT/frontend"

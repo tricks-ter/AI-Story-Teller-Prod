@@ -80,8 +80,26 @@ export default function StoryDetails({ story, user, onBack, onStartJourney, onEd
       } catch {}
       if (alive) setLoading(false);
     })();
-    return () => { alive = false; };
-  }, [storyId, story?.premise]);
+
+    const onCommentAdded = (e) => {
+      const { storyId: sId, tempId, realId } = e.detail || {};
+      if (sId !== storyId) return;
+      setSocial(prev => {
+        if (!prev) return prev;
+        const updated = (prev.comments || []).map(c => c.id === tempId ? { ...c, id: realId } : c);
+        const nextState = { ...prev, comments: updated };
+        persistSocial(nextState);
+        return nextState;
+      });
+    };
+    window.addEventListener('inkmind-social-comment-added', onCommentAdded);
+
+    return () => {
+      alive = false;
+      window.removeEventListener('inkmind-social-comment-added', onCommentAdded);
+    };
+  }, [storyId, story?.premise, persistSocial]);
+
 
   if (!story) return null;
 

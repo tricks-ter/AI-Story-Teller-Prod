@@ -1,7 +1,9 @@
 import { PlusCircle, MessageSquare, Trash2, Bot } from "lucide-react";
 
 function formatDate(iso) {
+  if (!iso) return "Recently";
   const d = new Date(iso);
+  if (isNaN(d.getTime())) return "Recently";
   const diff = Date.now() - d;
   const m = Math.floor(diff / 60000);
   const h = Math.floor(diff / 3600000);
@@ -12,6 +14,7 @@ function formatDate(iso) {
   if (dy < 7) return `${dy}d ago`;
   return d.toLocaleDateString();
 }
+
 
 export default function Sidebar({ sessions, activeId, onSelect, onCreate, onDelete, isOpen }) {
   return (

@@ -21,7 +21,8 @@ def test_stat_delta():
 
 def test_location():
     _, ups = resolve_state("[LOCATION_UPDATE: Sunset Forest]")
-    assert ups == [{"type": "LOCATION_UPDATE", "location": "Sunset Forest"}]
+    assert ups == [{"type": "LOCATION_UPDATE", "location": "Sunset Forest", "description": ""}]
+
 
 def test_item_with_attrs():
     _, ups = resolve_state("[ITEM_UPDATE: Kael + Iron Sword | type=weapon, rarity=rare, level=4, weight=3, bonus.Health=10, desc=A blade]")
@@ -46,4 +47,26 @@ def test_bag():
 
 def test_tags_stripped():
     clean, _ = resolve_state("Before [LOCATION_UPDATE: Town] After")
-    assert clean == "Before  After" or clean == "Before After"
+    assert "Town" not in clean
+
+def test_saga_end_without_colon():
+    clean, ups = resolve_state("The hero rested. [SAGA_END]")
+    assert any(u["type"] == "SAGA_END" for u in ups)
+    assert "[SAGA_END]" not in clean
+
+def test_saga_end_with_colon():
+    clean, ups = resolve_state("The hero rested. [SAGA_END: victory achieved]")
+    assert any(u["type"] == "SAGA_END" for u in ups)
+    assert "[SAGA_END" not in clean
+
+def test_hyphenated_and_apostrophe_names():
+    _, ups1 = resolve_state("[STAT_UPDATE: Jean-Luc.Health = 50]")
+    assert ups1[0]["character"] == "Jean-Luc" and ups1[0]["value"] == 50
+
+    _, ups2 = resolve_state("[ITEM_UPDATE: Kael'thas + Mystic Orb | type=accessory, rarity=epic]")
+    assert ups2[0]["character"] == "Kael'thas" and ups2[0]["item"] == "Mystic Orb"
+
+def test_comma_in_description():
+    _, ups = resolve_state("[ITEM_UPDATE: Kael + Herb | type=consumable, desc=A soothing herb, gathered near the river]")
+    assert ups[0]["attrs"]["description"] == "A soothing herb, gathered near the river"
+

@@ -39,6 +39,19 @@ def get_all_story_art():
     except Exception:
         return {}
 
+def get_story_art_by_ids(ids: list):
+    if not ids: return {}
+    try:
+        def fn(cur):
+            cur.execute(
+                "SELECT id, cover_image, banner_image FROM stories WHERE id = ANY(%s)", (ids,))
+            rows = cur.fetchall() or []
+            return {r["id"]: {"cover": r["cover_image"], "banner": r["banner_image"]} for r in rows}
+        return db._with_conn(fn) or {}
+    except Exception as e:
+        logger.error(f"get_story_art_by_ids failed: {e}")
+        return {}
+
 def set_character_image(story_id, character_name, image):
     db.execute_query(
         "UPDATE story_characters SET image = %s WHERE story_id = %s AND LOWER(name) = LOWER(%s)",
@@ -59,6 +72,18 @@ def set_character_image_by_id(story_id, char_id, image):
         logger.error(f"set_character_image_by_id failed: {e}")
         return False
 
+def update_character_details(story_id, char_id, fields):
+    allowed = {"name", "role", "background", "image"}
+    sets, params = [], []
+    for k, v in (fields or {}).items():
+        if k in allowed and v is not None:
+            sets.append(f"{k} = %s"); params.append(str(v))
+    if not sets: return False
+    params.extend([char_id, story_id])
+    return db.execute_query(
+        f"UPDATE story_characters SET {', '.join(sets)} WHERE id = %s AND story_id = %s",
+        tuple(params), fetch="none", commit=True) is not None
+
 def get_cast_with_images(story_id):
     return db.execute_query(
         "SELECT id, name, role, background, is_player, image FROM story_characters WHERE story_id = %s "
@@ -69,18 +94,49 @@ def can_manage_story(story, user_id):
     owner = story.get("creator_id")
     return owner == user_id or owner in (None, "", LEGACY_USER_ID)
 
+def delete_story_full(story_id):
+    """Deletes story with full cascade across all child playthroughs and social tables."""
+    def fn(cur):
+        cur.execute("SELECT id FROM playthroughs WHERE story_id = %s", (story_id,))
+        pt_rows = cur.fetchall() or []
+        pt_ids = [r["id"] for r in pt_rows]
+
+        for pid in pt_ids:
+            cur.execute("DELETE FROM playthrough_equipment WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM playthrough_items WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM playthrough_backpacks WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM playthrough_characters WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM locations WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM world_nodes WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM world_events WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM story_messages WHERE playthrough_id = %s", (pid,))
+            cur.execute("DELETE FROM playthroughs WHERE id = %s", (pid,))
+
+        cur.execute("DELETE FROM story_messages WHERE story_id = %s", (story_id,))
+        cur.execute("DELETE FROM story_characters WHERE story_id = %s", (story_id,))
+        cur.execute("DELETE FROM story_notes WHERE story_id = %s", (story_id,))
+        cur.execute("DELETE FROM story_likes WHERE story_id = %s", (story_id,))
+        cur.execute("DELETE FROM story_comments WHERE story_id = %s", (story_id,))
+        cur.execute("DELETE FROM stories WHERE id = %s", (story_id,))
+        return True
+    return db._with_conn(fn, commit=True) is True
+
 def update_story_fields(story_id, fields):
-    allowed = {"title", "genre", "premise", "cover_image", "banner_image"}
+    allowed = {"title", "genre", "premise", "cover_image", "banner_image", "is_public"}
     sets, params = [], []
     for k, v in (fields or {}).items():
         if k in allowed and v is not None:
-            sets.append(f"{k} = %s"); params.append(str(v))
+            if k == "is_public":
+                sets.append("is_public = %s"); params.append(bool(v))
+            else:
+                sets.append(f"{k} = %s"); params.append(str(v))
     if not sets: return False
     sets.append("updated_at = CURRENT_TIMESTAMP")
     params.append(story_id)
     db.execute_query(f"UPDATE stories SET {', '.join(sets)} WHERE id = %s",
                      tuple(params), fetch="none", commit=True)
     return True
+
 
 # ── Inventory: stacking & self-healing dedupe ──
 def find_stackable_item(playthrough_id, character_id, name):
