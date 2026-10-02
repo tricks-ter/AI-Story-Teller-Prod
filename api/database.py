@@ -44,7 +44,8 @@ class Database:
         self._lock = threading.RLock()
         if self.database_url:
             try:
-                self._pool = pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=self.database_url, connect_timeout=5)
+                # Disabled for Vercel serverless to force the fallback retry loop
+                self._pool = None
             except Exception as e:
                 logger.warning(f"ThreadedConnectionPool init failed, using fallback connection: {e}")
 
